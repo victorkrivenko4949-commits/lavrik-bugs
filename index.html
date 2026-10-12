@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сообщить об ошибке</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6fb;margin:0;padding:16px;color:#111}
+  .card{max-width:560px;margin:0 auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+  h1{font-size:24px;margin:0 0 6px}
+  p.hint{color:#555;margin:0 0 16px;font-size:15px}
+  label{display:block;font-weight:600;margin:14px 0 6px}
+  select,textarea{width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box}
+  textarea{min-height:140px;resize:vertical}
+  .btn{display:block;width:100%;font-size:20px;padding:16px;border:0;border-radius:14px;margin-top:12px;cursor:pointer;font-weight:700}
+  .mic{background:#e8f0ff;color:#1a4fd6}
+  .mic.on{background:#ffe3e3;color:#c0392b;animation:p 1s infinite}
+  .send{background:#1a4fd6;color:#fff}
+  .send:disabled{background:#9db1e6}
+  @keyframes p{50%{opacity:.6}}
+  .step{background:#fff8dc;border-radius:12px;padding:12px;margin-top:14px;font-size:15px}
+  .small{font-size:13px;color:#777;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🐞 Что сломалось, Лаврик?</h1>
+  <p class="hint">Нажми микрофон и расскажи. Или напечатай. Потом — «Отправить».</p>
+
+  <label>Где сломалось?</label>
+  <select id="gde">
+    <option>Сайт formyla.net</option>
+    <option>Телефон</option>
+    <option>Другое</option>
+  </select>
+
+  <label>Что случилось?</label>
+  <textarea id="chto" placeholder="Нажал на ... и выскочила ошибка ..."></textarea>
+  <button class="btn mic" id="mic">🎤 Рассказать голосом</button>
+  <div class="small" id="micnote"></div>
+
+  <label>Насколько мешает?</label>
+  <select id="vazhnost">
+    <option>🔴 Вообще не работает</option>
+    <option selected>🟡 Работает, но криво</option>
+    <option>🟢 Мелочь</option>
+  </select>
+
+  <button class="btn send" id="send">Отправить ➜</button>
+
+  <div class="step">📸 <b>Скриншот:</b> после нажатия «Отправить» откроется GitHub. Там перетащи картинку в поле «Что случилось?» (или вставь — Ctrl+V / «Вставить»). Потом нажми зелёную кнопку <b>Submit new issue</b>.</div>
+</div>
+
+<script>
+const REPO = 'victorkrivenko4949-commits/lavrik-bugs';
+const chto = document.getElementById('chto');
+const mic = document.getElementById('mic');
+const note = document.getElementById('micnote');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, base = '';
+
+if (!SR) {
+  mic.disabled = true;
+  mic.textContent = '🎤 Голос: нажми микрофон на клавиатуре';
+  note.textContent = 'В этом браузере нет распознавания речи. Открой в Chrome или используй микрофон на клавиатуре телефона.';
+} else {
+  rec = new SR();
+  rec.lang = 'ru-RU';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = e => {
+    let fin = '', tmp = '';
+    for (let i = 0; i < e.results.length; i++) {
+      (e.results[i].isFinal ? fin += e.results[i][0].transcript + ' ' : tmp += e.results[i][0].transcript);
+    }
+    chto.value = (base + fin + tmp).trim();
+  };
+  rec.onerror = e => { note.textContent = 'Микрофон: ' + e.error + '. Разреши доступ к микрофону и попробуй ещё.'; stop(); };
+  rec.onend = () => { if (listening) stop(); };
+}
+function start(){ base = chto.value ? chto.value.trim() + ' ' : ''; listening = true; mic.classList.add('on'); mic.textContent = '⏹ Говори… нажми, чтобы остановить'; rec.start(); }
+function stop(){ listening = false; mic.classList.remove('on'); mic.textContent = '🎤 Рассказать голосом'; try { rec && rec.stop(); } catch(_){} }
+mic.onclick = () => listening ? stop() : start();
+
+document.getElementById('send').onclick = () => {
+  const text = chto.value.trim();
+  if (!text) { chto.focus(); note.textContent = 'Сначала расскажи или напиши, что случилось.'; return; }
+  if (listening) stop();
+  const title = '[Баг] ' + text.slice(0, 60) + (text.length > 60 ? '…' : '');
+  const p = new URLSearchParams({
+    template: 'bug.yml',
+    title,
+    gde: document.getElementById('gde').value,
+    chto: text,
+    vazhnost: document.getElementById('vazhnost').value
+  });
+  location.href = 'https://github.com/' + REPO + '/issues/new?' + p.toString();
+};
+</script>
+</body>
+</html>

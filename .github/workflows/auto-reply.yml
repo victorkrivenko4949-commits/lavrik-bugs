@@ -1,0 +1,19 @@
+name: Автоответ Лаврику
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const n = context.issue.number;
+            await github.rest.issues.addLabels({ ...context.repo, issue_number: n, labels: ['bug'] });
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: n,
+              body: '✅ Принято, Лаврик! Агент посмотрит и напишет здесь, когда починит. Если забыл скрин — просто перетащи его в комментарий.'
+            });

@@ -1,0 +1,52 @@
+name: "🐞 Сообщить об ошибке"
+description: "Расскажи, что сломалось. Можно голосом и со скринами."
+title: "[Баг] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Привет, Лаврик! 👋
+        Заполни пару полей — агент сам всё прочитает и починит.
+
+        **Скриншот:** перетащи картинку в поле «Что случилось?» или вставь её туда (Ctrl+V / «Вставить» на телефоне). Ссылка на картинку появится сама.
+
+        **Голос:** нажми микрофон 🎤 на клавиатуре телефона и говори — текст напечатается.
+  - type: dropdown
+    id: gde
+    attributes:
+      label: "Где сломалось?"
+      options:
+        - "Сайт formyla.net"
+        - "Телефон"
+        - "Другое"
+    validations:
+      required: true
+  - type: textarea
+    id: chto
+    attributes:
+      label: "Что случилось?"
+      description: "Напиши или надиктуй своими словами. Сюда же перетащи скриншоты."
+      placeholder: "Нажал на ... и выскочила ошибка ..."
+    validations:
+      required: true
+  - type: textarea
+    id: kak
+    attributes:
+      label: "Как повторить? (если знаешь)"
+      placeholder: "1. Открыл ... 2. Нажал ... 3. Получил ..."
+  - type: input
+    id: ssylka
+    attributes:
+      label: "Ссылка на страницу (если есть)"
+      placeholder: "https://formyla.net/..."
+  - type: dropdown
+    id: vazhnost
+    attributes:
+      label: "Насколько мешает?"
+      options:
+        - "🔴 Вообще не работает"
+        - "🟡 Работает, но криво"
+        - "🟢 Мелочь"
+    validations:
+      required: true
