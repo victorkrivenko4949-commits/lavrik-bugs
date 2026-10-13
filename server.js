@@ -3,6 +3,12 @@ const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '15mb' }));
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 const SUPA_URL = process.env.SUPABASE_URL || '';
