@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сообщить об ошибке</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6fb;margin:0;padding:16px;color:#111}
+  .card{max-width:560px;margin:0 auto;background:#fff;border-radius:16px;padding:20px;box-shadow:0 2px 12px rgba(0,0,0,.08)}
+  h1{font-size:24px;margin:0 0 6px}
+  p.hint{color:#555;margin:0 0 16px;font-size:15px}
+  label{display:block;font-weight:600;margin:14px 0 6px}
+  select,textarea,input[type=url]{width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box}
+  textarea{min-height:140px;resize:vertical}
+  .btn{display:block;width:100%;font-size:20px;padding:16px;border:0;border-radius:14px;margin-top:12px;cursor:pointer;font-weight:700}
+  .mic{background:#e8f0ff;color:#1a4fd6}
+  .mic.on{background:#ffe3e3;color:#c0392b;animation:p 1s infinite}
+  .send{background:#1a4fd6;color:#fff}
+  .send:disabled{background:#9db1e6;cursor:wait}
+  @keyframes p{50%{opacity:.6}}
+  .small{font-size:13px;color:#777;margin-top:10px}
+  .ok{background:#e6f9e8;color:#0d6e1c;border-radius:12px;padding:14px;margin-top:14px;font-size:16px;font-weight:600}
+  .err{background:#ffe3e3;color:#c0392b;border-radius:12px;padding:14px;margin-top:14px;font-size:15px}
+  .srinput{display:none}
+  .srlabel{font-size:13px;color:#1a4fd6;margin-top:8px;cursor:pointer;text-decoration:underline}
+  .preview{margin-top:8px;max-width:100%;border-radius:8px;max-height:200px}
+  .spinner{display:inline-block;width:16px;height:16px;border:3px solid #fff;border-top-color:transparent;border-radius:50%;vertical-align:-3px;margin-right:8px;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🐞 Что сломалось, Лаврик?</h1>
+  <p class="hint">Нажми микрофон и расскажи. Или напиши. Можно приложить скриншот. Потом — «Отправить».</p>
+
+  <label>Где сломалось?</label>
+  <select id="gde">
+    <option>Задачи дня</option>
+    <option>Чертежи</option>
+    <option>ИИ-репетитор</option>
+    <option>Сайт formyla.net (другое)</option>
+    <option>Телефон</option>
+    <option>Другое</option>
+  </select>
+
+  <label>Что случилось?</label>
+  <textarea id="chto" placeholder="Нажал на ... и выскочила ошибка ..."></textarea>
+  <button class="btn mic" id="mic">🎤 Рассказать голосом</button>
+  <div class="small" id="micnote"></div>
+
+  <label>Как повторить? (если знаешь)</label>
+  <textarea id="kak" placeholder="1. Открыл ... 2. Нажал ..." style="min-height:80px"></textarea>
+
+  <label>Ссылка на страницу (если есть)</label>
+  <input type="url" id="ssylka" placeholder="https://formyla.net/..." style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
+
+  <label>Скриншот (если есть)</label>
+  <input type="file" id="skrin" accept="image/*" class="srinput">
+  <label class="srlabel" for="skrin" id="srlabel">📎 Прикрепить скриншот</label>
+  <img id="skrinPreview" class="preview" style="display:none">
+
+  <label>Насколько мешает?</label>
+  <select id="vazhnost">
+    <option>🔴 Вообще не работает</option>
+    <option selected>🟡 Работает, но криво</option>
+    <option>🟢 Мелочь</option>
+  </select>
+
+  <button class="btn send" id="send">Отправить ➜</button>
+
+  <div class="ok" id="okmsg" style="display:none">✅ <span id="oktext">Обращение №… сохранено</span></div>
+  <div class="err" id="errmsg" style="display:none">⚠️ <span id="errtext"></span></div>
+</div>
+
+<script>
+const chto = document.getElementById('chto');
+const mic = document.getElementById('mic');
+const note = document.getElementById('micnote');
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false, base = '';
+
+if (!SR) {
+  mic.disabled = true;
+  mic.textContent = '🎤 Голос: нажми микрофон на клавиатуре';
+  note.textContent = 'В этом браузере нет распознавания речи. Открой в Chrome или используй микрофон на клавиатуре телефона.';
+} else {
+  rec = new SR();
+  rec.lang = 'ru-RU';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = e => {
+    let fin = '', tmp = '';
+    for (let i = 0; i < e.results.length; i++) {
+      (e.results[i].isFinal ? fin += e.results[i][0].transcript + ' ' : tmp += e.results[i][0].transcript);
+    }
+    chto.value = (base + fin + tmp).trim();
+  };
+  rec.onerror = e => { note.textContent = 'Микрофон: ' + e.error + '. Разреши доступ к микрофону и попробуй ещё.'; stop(); };
+  rec.onend = () => { if (listening) stop(); };
+}
+function start(){ base = chto.value ? chto.value.trim() + ' ' : ''; listening = true; mic.classList.add('on'); mic.textContent = '⏹ Говори… нажми, чтобы остановить'; rec.start(); }
+function stop(){ listening = false; mic.classList.remove('on'); mic.textContent = '🎤 Рассказать голосом'; try { rec && rec.stop(); } catch(_){} }
+mic.onclick = () => listening ? stop() : start();
+
+const skrin = document.getElementById('skrin');
+const skrinPreview = document.getElementById('skrinPreview');
+const srlabel = document.getElementById('srlabel');
+skrin.onchange = () => {
+  if (skrin.files && skrin.files[0]) {
+    srlabel.textContent = '📎 ' + skrin.files[0].name + ' (нажми, чтобы заменить)';
+    const r = new FileReader();
+    r.onload = e => { skrinPreview.src = e.target.result; skrinPreview.style.display = 'block'; };
+    r.readAsDataURL(skrin.files[0]);
+  } else {
+    srlabel.textContent = '📎 Прикрепить скриншот';
+    skrinPreview.style.display = 'none';
+  }
+};
+
+function reset(){
+  document.getElementById('gde').selectedIndex = 0;
+  chto.value = '';
+  document.getElementById('kak').value = '';
+  document.getElementById('ssylka').value = '';
+  document.getElementById('vazhnost').selectedIndex = 1;
+  skrin.value = ''; skrinPreview.style.display='none'; srlabel.textContent='📎 Прикрепить скриншот';
+}
+
+document.getElementById('send').onclick = async () => {
+  const btn = document.getElementById('send');
+  const okmsg = document.getElementById('okmsg');
+  const errmsg = document.getElementById('errmsg');
+  const errtext = document.getElementById('errtext');
+  okmsg.style.display='none'; errmsg.style.display='none';
+
+  const text = chto.value.trim();
+  if (!text) { chto.focus(); note.textContent = 'Сначала расскажи или напиши, что случилось.'; return; }
+  if (listening) stop();
+
+  let skrinB64 = null;
+  if (skrin.files && skrin.files[0]) {
+    const f = skrin.files[0];
+    if (f.size > 5*1024*1024) { errtext.textContent='Скриншот больше 5 МБ — уменьши и попробуй ещё.'; errmsg.style.display='block'; return; }
+    skrinB64 = await new Promise(res => { const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(f); });
+  }
+
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>Отправляем…';
+
+  try {
+    const r = await fetch('/api/bugs', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        razdel: document.getElementById('gde').value,
+        chto: text,
+        kak: document.getElementById('kak').value.trim(),
+        ssylka: document.getElementById('ssylka').value.trim(),
+        vazhnost: document.getElementById('vazhnost').value,
+        skrin: skrinB64
+      })
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || 'Сервер ответил ошибкой ' + r.status);
+    document.getElementById('oktext').textContent = 'Обращение №' + (j.id ?? '?') + ' сохранено. Спасибо, Лаврик!';
+    okmsg.style.display='block';
+    reset();
+  } catch(e) {
+    errtext.textContent = 'Не отправилось: ' + (e.message||e) + '. Проверь интернет и попробуй ещё.';
+    errmsg.style.display='block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+};
+</script>
+</body>
+</html>

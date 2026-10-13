@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Баги Лаврика — админ</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6fb;margin:0;padding:24px;color:#111}
+  h1{font-size:22px;margin:0 0 16px}
+  .bug{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px;max-width:760px}
+  .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .id{color:#888;font-size:13px}
+  .razdel{background:#e8f0ff;color:#1a4fd6;border-radius:8px;padding:3px 8px;font-size:13px;font-weight:600}
+  .vazhnost{font-size:13px}
+  .chto{margin:10px 0 6px;font-size:16px;white-space:pre-wrap}
+  .meta{font-size:13px;color:#777}
+  img{max-width:100%;border-radius:10px;margin-top:10px}
+  .status{display:inline-block;padding:3px 10px;border-radius:8px;font-size:12px;font-weight:700}
+  .new{background:#ffe3e3;color:#c0392b}
+  .in_progress{background:#fff8dc;color:#a07a00}
+  .done{background:#e6f9e8;color:#0d6e1c}
+  .kak{margin:8px 0;background:#fafafa;border-radius:8px;padding:8px;font-size:14px;white-space:pre-wrap}
+  a{color:#1a4fd6}
+</style>
+</head>
+<body>
+<h1>🐞 Баги Лаврика</h1>
+<div id="list">Загрузка…</div>
+<script>
+const badge = s => '<span class="status ' + (s||'new') + '">' + (s==='new'?'Новый':s==='in_progress'?'В работе':'Готово') + '</span>';
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));}
+fetch('/api/bugs').then(r=>r.json()).then(bugs=>{
+  const el = document.getElementById('list');
+  if (!Array.isArray(bugs) || !bugs.length) { el.textContent = 'Пока пусто — Лаврик ещё не нашёл багов.'; return; }
+  el.innerHTML = bugs.map(b=>'<div class="bug">' +
+    '<div class="head"><span class="id">#' + b.id + '</span>' +
+    '<span class="razdel">' + esc(b.razdel) + '</span>' +
+    '<span class="vazhnost">' + esc(b.vazhnost) + '</span>' + badge(b.status) + '</div>' +
+    '<div class="chto">' + esc(b.chto) + '</div>' +
+    (b.kak ? '<div class="kak"><b>Как повторить:</b> ' + esc(b.kak) + '</div>' : '') +
+    (b.ssylka ? '<div class="meta">Ссылка: <a href="' + esc(b.ssylka) + '" target="_blank">' + esc(b.ssylka) + '</a></div>' : '') +
+    (b.skrin ? '<img src="' + b.skrin + '" alt="скриншот">' : '') +
+    '<div class="meta">Отправлено: ' + (b.created_at ? new Date(b.created_at).toLocaleString('ru-RU') : '—') + '</div>' +
+    '</div>').join('');
+});
+</script>
+</body>
+</html>
