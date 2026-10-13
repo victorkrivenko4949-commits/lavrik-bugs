@@ -27,22 +27,86 @@
 <h1>🐞 Баги Лаврика</h1>
 <div id="list">Загрузка…</div>
 <script>
-const badge = s => '<span class="status ' + (s||'new') + '">' + (s==='new'?'Новый':s==='in_progress'?'В работе':'Готово') + '</span>';
-function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&','<':'<','>':'>','"':'"',"'":'&#39;'}[c]));}
-fetch('/api/bugs').then(r=>r.json()).then(bugs=>{
-  const el = document.getElementById('list');
-  if (!Array.isArray(bugs) || !bugs.length) { el.textContent = 'Пока пусто — Лаврик ещё не нашёл багов.'; return; }
-  el.innerHTML = bugs.map(b=>'<div class="bug">' +
-    '<div class="head"><span class="id">#' + b.id + '</span>' +
-    '<span class="razdel">' + esc(b.razdel) + '</span>' +
-    '<span class="vazhnost">' + esc(b.vazhnost) + '</span>' + badge(b.status) + '</div>' +
-    '<div class="chto">' + esc(b.chto) + '</div>' +
-    (b.kak ? '<div class="kak"><b>Как повторить:</b> ' + esc(b.kak) + '</div>' : '') +
-    (b.ssylka ? '<div class="meta">Ссылка: <a href="' + esc(b.ssylka) + '" target="_blank">' + esc(b.ssylka) + '</a></div>' : '') +
-    (b.skrin ? '<img src="' + b.skrin + '" alt="скриншот">' : '') +
-    '<div class="meta">Отправлено: ' + (b.created_at ? new Date(b.created_at).toLocaleString('ru-RU') : '—') + '</div>' +
-    '</div>').join('');
-});
+const STATUS_MAP = { new:'Новый', in_progress:'В работе', done:'Готово' };
+function esc(s){
+  return String(s||'').replace(/[&<>"'/]/g, c => {
+    return {'&':'&','<':'<','>':'>','"':'"',"'":'&#39;','/':'&#x2F;'}[c];
+  });
+}
+function isImgDataUrl(s){
+  return typeof s === 'string' && s.startsWith('data:image/') && /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(s.slice(0,200));
+}
+function renderBug(b){
+  const d = document.createElement('div');
+  d.className = 'bug';
+
+  const head = document.createElement('div');
+  head.className = 'head';
+  const id = document.createElement('span'); id.className='id'; id.textContent = '#' + b.id;
+  const raz = document.createElement('span'); raz.className='razdel'; raz.textContent = b.razdel || '—';
+  const vaz = document.createElement('span'); vaz.className='vazhnost'; vaz.textContent = b.vazhnost || '';
+  const st = document.createElement('span');
+  st.className = 'status ' + (b.status && STATUS_MAP[b.status] !== undefined ? b.status : 'new');
+  st.textContent = STATUS_MAP[b.status] !== undefined ? STATUS_MAP[b.status] : 'Новый';
+  head.append(id, raz, vaz, st);
+  d.appendChild(head);
+
+  const chto = document.createElement('div');
+  chto.className = 'chto';
+  chto.textContent = b.chto;
+  d.appendChild(chto);
+
+  if (b.kak) {
+    const k = document.createElement('div');
+    k.className='kak';
+    k.textContent = 'Как повторить: ' + b.kak;
+    d.appendChild(k);
+  }
+
+  if (b.ssylka && /^https?:\/\//.test(b.ssylka)) {
+    const m = document.createElement('div');
+    m.className='meta';
+    const a = document.createElement('a');
+    a.href = b.ssylka; a.target = '_blank'; a.rel='noopener noreferrer';
+    a.textContent = b.ssylka;
+    m.textContent = 'Ссылка: ';
+    m.appendChild(a);
+    d.appendChild(m);
+  }
+
+  if (b.skrin && isImgDataUrl(b.skrin)) {
+    const img = document.createElement('img');
+    img.src = b.skrin;
+    img.alt = 'скриншот';
+    img.referrerPolicy = 'no-referrer';
+    d.appendChild(img);
+  }
+
+  const meta = document.createElement('div');
+  meta.className='meta';
+  meta.textContent = 'Отправлено: ' + (b.created_at ? new Date(b.created_at).toLocaleString('ru-RU') : '—');
+  d.appendChild(meta);
+
+  return d;
+}
+
+const el = document.getElementById('list');
+fetch('/api/bugs')
+  .then(r => {
+    if (!r.ok) throw new Error('Сервер ответил ' + r.status);
+    return r.json();
+  })
+  .then(bugs => {
+    el.textContent = '';
+    if (!Array.isArray(bugs) || !bugs.length) {
+      el.textContent = 'Пока пусто — Лаврик ещё не нашёл багов.';
+      return;
+    }
+    bugs.forEach(b => el.appendChild(renderBug(b)));
+  })
+  .catch(e => {
+    el.textContent = 'Ошибка загрузки: ' + (e.message||e) + '. Обнови страницу.';
+  });
 </script>
 </body>
 </html>
