@@ -7,7 +7,12 @@
 <style>
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f6fb;margin:0;padding:24px;color:#111}
   h1{font-size:22px;margin:0 0 16px}
+  .tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{border:0;border-radius:10px;padding:8px 14px;font-size:14px;font-weight:600;cursor:pointer;background:#e4e8f2;color:#333}
+  .tab.active{background:#1a4fd6;color:#fff}
+  .tab .cnt{opacity:.75;font-weight:400;margin-left:4px}
   .bug{background:#fff;border-radius:14px;padding:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);margin-bottom:14px;max-width:760px}
+  .bug.done{opacity:.8;background:#f7fcf8}
   .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
   .id{color:#888;font-size:13px}
   .razdel{background:#e8f0ff;color:#1a4fd6;border-radius:8px;padding:3px 8px;font-size:13px;font-weight:600}
@@ -18,27 +23,64 @@
   .status{display:inline-block;padding:3px 10px;border-radius:8px;font-size:12px;font-weight:700}
   .new{background:#ffe3e3;color:#c0392b}
   .in_progress{background:#fff8dc;color:#a07a00}
-  .done{background:#e6f9e8;color:#0d6e1c}
+  .done .status.done,.status.done{background:#e6f9e8;color:#0d6e1c}
   .kak{margin:8px 0;background:#fafafa;border-radius:8px;padding:8px;font-size:14px;white-space:pre-wrap}
+  .actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .btn{border:0;border-radius:9px;padding:8px 12px;font-size:14px;cursor:pointer;font-weight:600}
+  .btn-done{background:#0d6e1c;color:#fff}
+  .btn-work{background:#f2d675;color:#5a4400}
+  .btn-back{background:#e4e8f2;color:#333}
+  .btn:disabled{opacity:.5;cursor:default}
+  .empty{color:#777;padding:12px 0}
+  .err{color:#c0392b;font-size:13px;margin-top:6px}
   a{color:#1a4fd6}
 </style>
 </head>
 <body>
 <h1>🐞 Баги Лаврика</h1>
+<div class="tabs">
+  <button class="tab active" data-tab="open">🔴 Не исправлено<span class="cnt" id="cnt-open"></span></button>
+  <button class="tab" data-tab="done">✅ Исправлено<span class="cnt" id="cnt-done"></span></button>
+</div>
 <div id="list">Загрузка…</div>
 <script>
 const STATUS_MAP = { new:'Новый', in_progress:'В работе', done:'Готово' };
-function esc(s){
-  return String(s||'').replace(/[&<>"'/]/g, c => {
-    return {'&':'&','<':'<','>':'>','"':'"',"'":'&#39;','/':'&#x2F;'}[c];
-  });
-}
+let ALL = [];
+let TAB = 'open';
+let NEED_KEY = false;
+
 function isImgDataUrl(s){
   return typeof s === 'string' && s.startsWith('data:image/') && /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(s.slice(0,200));
 }
+function getKey(){
+  if (!NEED_KEY) return '';
+  let k = localStorage.getItem('lavrik_admin_key') || '';
+  if (!k) { k = prompt('Ключ админа:') || ''; if (k) localStorage.setItem('lavrik_admin_key', k); }
+  return k;
+}
+async function setStatus(b, status, btnRow){
+  const btns = btnRow.querySelectorAll('button');
+  btns.forEach(x => x.disabled = true);
+  try {
+    const headers = { 'Content-Type':'application/json' };
+    const k = getKey(); if (k) headers['x-admin-key'] = k;
+    const r = await fetch('/api/bugs/' + b.id, { method:'PATCH', headers, body: JSON.stringify({ status }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401) { localStorage.removeItem('lavrik_admin_key'); throw new Error('Неверный ключ админа'); }
+    if (!r.ok) throw new Error(j.error || ('Сервер ответил ' + r.status));
+    b.status = status;
+    render();
+  } catch(e) {
+    btns.forEach(x => x.disabled = false);
+    let er = btnRow.parentElement.querySelector('.err');
+    if (!er) { er = document.createElement('div'); er.className = 'err'; btnRow.parentElement.appendChild(er); }
+    er.textContent = 'Не получилось: ' + (e.message || e);
+  }
+}
 function renderBug(b){
+  const isDone = b.status === 'done';
   const d = document.createElement('div');
-  d.className = 'bug';
+  d.className = 'bug' + (isDone ? ' done' : '');
 
   const head = document.createElement('div');
   head.className = 'head';
@@ -46,8 +88,9 @@ function renderBug(b){
   const raz = document.createElement('span'); raz.className='razdel'; raz.textContent = b.razdel || '—';
   const vaz = document.createElement('span'); vaz.className='vazhnost'; vaz.textContent = b.vazhnost || '';
   const st = document.createElement('span');
-  st.className = 'status ' + (b.status && STATUS_MAP[b.status] !== undefined ? b.status : 'new');
-  st.textContent = STATUS_MAP[b.status] !== undefined ? STATUS_MAP[b.status] : 'Новый';
+  const stKey = STATUS_MAP[b.status] !== undefined ? b.status : 'new';
+  st.className = 'status ' + stKey;
+  st.textContent = STATUS_MAP[stKey];
   head.append(id, raz, vaz, st);
   d.appendChild(head);
 
@@ -78,6 +121,7 @@ function renderBug(b){
     const img = document.createElement('img');
     img.src = b.skrin;
     img.alt = 'скриншот';
+    img.loading = 'lazy';
     img.referrerPolicy = 'no-referrer';
     d.appendChild(img);
   }
@@ -87,22 +131,53 @@ function renderBug(b){
   meta.textContent = 'Отправлено: ' + (b.created_at ? new Date(b.created_at).toLocaleString('ru-RU') : '—');
   d.appendChild(meta);
 
+  const row = document.createElement('div');
+  row.className = 'actions';
+  if (!isDone) {
+    if (b.status !== 'in_progress') {
+      const w = document.createElement('button'); w.className='btn btn-work'; w.textContent='🛠 В работе';
+      w.onclick = () => setStatus(b, 'in_progress', row); row.appendChild(w);
+    }
+    const ok = document.createElement('button'); ok.className='btn btn-done'; ok.textContent='✅ Исправлено';
+    ok.onclick = () => setStatus(b, 'done', row); row.appendChild(ok);
+  } else {
+    const back = document.createElement('button'); back.className='btn btn-back'; back.textContent='↩ Вернуть в работу';
+    back.onclick = () => setStatus(b, 'in_progress', row); row.appendChild(back);
+  }
+  d.appendChild(row);
   return d;
 }
 
 const el = document.getElementById('list');
+function render(){
+  const open = ALL.filter(b => b.status !== 'done');
+  const done = ALL.filter(b => b.status === 'done');
+  document.getElementById('cnt-open').textContent = '(' + open.length + ')';
+  document.getElementById('cnt-done').textContent = '(' + done.length + ')';
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === TAB));
+  el.textContent = '';
+  const items = TAB === 'open' ? open : done;
+  if (!items.length) {
+    const e = document.createElement('div'); e.className = 'empty';
+    e.textContent = TAB === 'open'
+      ? (ALL.length ? 'Всё исправлено 🎉 Открытых багов нет.' : 'Пока пусто — Лаврик ещё не нашёл багов.')
+      : 'Исправленных пока нет.';
+    el.appendChild(e);
+    return;
+  }
+  items.forEach(b => el.appendChild(renderBug(b)));
+}
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => { TAB = t.dataset.tab; render(); });
+
+fetch('/api/config').then(r => r.json()).then(c => { NEED_KEY = Boolean(c.needKey); }).catch(() => {});
 fetch('/api/bugs')
   .then(r => {
     if (!r.ok) throw new Error('Сервер ответил ' + r.status);
     return r.json();
   })
   .then(bugs => {
-    el.textContent = '';
-    if (!Array.isArray(bugs) || !bugs.length) {
-      el.textContent = 'Пока пусто — Лаврик ещё не нашёл багов.';
-      return;
-    }
-    bugs.forEach(b => el.appendChild(renderBug(b)));
+    ALL = Array.isArray(bugs) ? bugs : [];
+    render();
   })
   .catch(e => {
     el.textContent = 'Ошибка загрузки: ' + (e.message||e) + '. Обнови страницу.';
