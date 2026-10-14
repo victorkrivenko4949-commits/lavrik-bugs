@@ -11,3 +11,11 @@ services:
         sync: false
       - key: SUPABASE_ANON_KEY
         sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: victorkrivenko4949-commits/lavrik-bugs
+      - key: ADMIN_KEY
+        sync: false

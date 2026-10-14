@@ -13,16 +13,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const SUPA_URL = process.env.SUPABASE_URL || '';
 const SUPA_KEY = process.env.SUPABASE_ANON_KEY || '';
-// Необязательный ключ админа: если задан, смена статуса требует заголовок x-admin-key
+// Ключ для чтения на сервере: service_role (обходит RLS). Если не задан — anon.
+const SUPA_READ_KEY = process.env.SUPABASE_SERVICE_KEY || SUPA_KEY;
+
+// GitHub: дублирование багов в Issues, чтобы агент видел их через GitHub
+const GH_TOKEN = process.env.GITHUB_TOKEN || '';
+const GH_REPO = process.env.GITHUB_REPO || 'victorkrivenko4949-commits/lavrik-bugs';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
-
-const STATUSES = ['new', 'in_progress', 'done'];
-
-const supaHeaders = (extra = {}) => ({
-  'apikey': SUPA_KEY,
-  'Authorization': 'Bearer ' + SUPA_KEY,
-  ...extra
-});
 
 // Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
@@ -46,31 +43,106 @@ function sanitizeText(v, max=5000){
   return v.slice(0, max);
 }
 
-function checkAdmin(req, res, next){
-  if (!ADMIN_KEY) return next();
-  if (req.get('x-admin-key') === ADMIN_KEY) return next();
-  res.status(401).json({ error: 'Нужен ключ админа (x-admin-key)' });
+function supaHeaders(key, extra={}){
+  return { 'apikey': key, 'Authorization': 'Bearer ' + key, ...extra };
 }
 
+async function supaSelectBugs(){
+  const r = await fetch(SUPA_URL + '/rest/v1/bugs?select=id,razdel,chto,kak,ssylka,vazhnost,skrin,status,created_at&order=created_at.desc', {
+    headers: supaHeaders(SUPA_READ_KEY)
+  });
+  if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
+  return r.json();
+}
+
+// ---------- GitHub Issues ----------
+const MARK = id => `<!-- lavrik-bug-id:${id} -->`;
+
+function ghHeaders(){
+  return {
+    'Authorization': 'Bearer ' + GH_TOKEN,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+    'User-Agent': 'lavrik-bugs'
+  };
+}
+
+function issueTitle(b){
+  const t = String(b.chto || '').replace(/\s+/g,' ').trim();
+  return `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${t.slice(0,70)}${t.length>70?'…':''}`;
+}
+
+function issueBody(b, baseUrl){
+  const lines = [
+    MARK(b.id),
+    `**Где сломалось:** ${b.razdel || '—'}`,
+    `**Важность:** ${b.vazhnost || '—'}`,
+    `**Статус в базе:** ${b.status || 'new'}`,
+    `**Отправлено:** ${b.created_at ? new Date(b.created_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—'}`,
+    '',
+    '### Что случилось',
+    b.chto || '—',
+  ];
+  if (b.kak) lines.push('', '### Как повторить', b.kak);
+  if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
+  if (b.skrin) lines.push('', `📸 Есть скриншот — открыть: ${baseUrl}/admin.html#bug-${b.id}`);
+  lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано автоматически сервером lavrik-bugs._`);
+  return lines.join('\n');
+}
+
+function labelsFor(b){
+  const labels = ['bug'];
+  const v = String(b.vazhnost || '');
+  if (v.startsWith('🔴')) labels.push('критично');
+  else if (v.startsWith('🟢')) labels.push('мелочь');
+  if (b.razdel) labels.push(String(b.razdel).slice(0,50));
+  return labels;
+}
+
+async function ghCreateIssue(b, baseUrl){
+  if (!GH_TOKEN) throw new Error('GITHUB_TOKEN not set');
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues`, {
+    method: 'POST',
+    headers: ghHeaders(),
+    body: JSON.stringify({ title: issueTitle(b), body: issueBody(b, baseUrl), labels: labelsFor(b) })
+  });
+  if (!r.ok) throw new Error('github: ' + r.status + ' ' + await r.text());
+  const j = await r.json();
+  return j.html_url;
+}
+
+async function ghExistingBugIds(){
+  const ids = new Set();
+  for (let page = 1; page <= 20; page++) {
+    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues?state=all&per_page=100&page=${page}`, { headers: ghHeaders() });
+    if (!r.ok) throw new Error('github list: ' + r.status + ' ' + await r.text());
+    const arr = await r.json();
+    for (const it of arr) {
+      const m = /lavrik-bug-id:(\d+)/.exec(it.body || '');
+      if (m) ids.add(Number(m[1]));
+    }
+    if (arr.length < 100) break;
+  }
+  return ids;
+}
+
+function baseUrlOf(req){
+  const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+  return `${proto}://${req.get('host')}`;
+}
+
+// ---------- API ----------
 app.get('/api/config', (req,res) => res.json({
   ok: Boolean(SUPA_URL && SUPA_KEY),
-  needKey: Boolean(ADMIN_KEY)
+  github: Boolean(GH_TOKEN),
+  repo: GH_REPO
 }));
 
-// GET /api/bugs            — все баги
-// GET /api/bugs?status=open — только неисправленные (new + in_progress)
-// GET /api/bugs?status=done — только исправленные
 app.get('/api/bugs', async (req,res) => {
   if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
-  try {
-    let q = '/rest/v1/bugs?select=id,razdel,chto,kak,ssylka,vazhnost,skrin,status,created_at&order=created_at.desc';
-    const s = String(req.query.status || '');
-    if (s === 'open') q += '&status=neq.done';
-    else if (STATUSES.includes(s)) q += '&status=eq.' + s;
-    const r = await fetch(SUPA_URL + q, { headers: supaHeaders() });
-    if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
-    res.json(await r.json());
-  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+  try { res.json(await supaSelectBugs()); }
+  catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
 app.post('/api/bugs', async (req,res) => {
@@ -92,38 +164,43 @@ app.post('/api/bugs', async (req,res) => {
 
     const r = await fetch(SUPA_URL + '/rest/v1/bugs', {
       method: 'POST',
-      headers: supaHeaders({ 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
+      headers: supaHeaders(SUPA_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
       body: JSON.stringify(payload)
     });
     if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
     const created = await r.json();
-    res.json({ ok: true, id: created[0]?.id ?? null });
+    const bug = created[0] || { ...payload, id: null, created_at: new Date().toISOString() };
+
+    // Дублируем в GitHub Issues (ошибка GitHub не ломает отправку бага)
+    let issue_url = null, issue_error = null;
+    if (GH_TOKEN) {
+      try { issue_url = await ghCreateIssue(bug, baseUrlOf(req)); }
+      catch(e){ issue_error = String(e.message||e); console.error('github issue failed:', issue_error); }
+    }
+
+    res.json({ ok: true, id: bug.id ?? null, issue_url, issue_error });
   } catch(e){
     res.status(500).json({ error: String(e.message||e) });
   }
 });
 
-// PATCH /api/bugs/:id  { status: 'new' | 'in_progress' | 'done' }
-// Исправленный баг получает status=done и уходит со страницы «Не исправлено» в «Исправлено».
-app.patch('/api/bugs/:id', checkAdmin, async (req,res) => {
-  if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
-  const id = Number(req.params.id);
-  const { status } = req.body || {};
-  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Плохой id' });
-  if (!STATUSES.includes(status)) return res.status(400).json({ error: 'status должен быть new | in_progress | done' });
+// Разовая синхронизация: все баги из Supabase, которых ещё нет в Issues.
+// Открыть в браузере: /api/sync-issues?key=ВАШ_ADMIN_KEY
+app.get('/api/sync-issues', async (req,res) => {
+  if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).json({ error: 'forbidden' });
+  if (!GH_TOKEN) return res.status(500).json({ error: 'GITHUB_TOKEN not set' });
   try {
-    const r = await fetch(SUPA_URL + '/rest/v1/bugs?id=eq.' + id, {
-      method: 'PATCH',
-      headers: supaHeaders({ 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
-      body: JSON.stringify({ status })
-    });
-    if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
-    const rows = await r.json();
-    if (!Array.isArray(rows) || !rows.length) return res.status(404).json({ error: 'Баг #' + id + ' не найден (или RLS запрещает UPDATE)' });
-    res.json({ ok: true, id, status: rows[0].status });
-  } catch(e){
-    res.status(500).json({ error: String(e.message||e) });
-  }
+    const bugs = await supaSelectBugs();
+    const have = await ghExistingBugIds();
+    const created = [], failed = [];
+    const baseUrl = baseUrlOf(req);
+    for (const b of [...bugs].reverse()) { // старые первыми — чтобы номера issue шли по порядку
+      if (have.has(Number(b.id))) continue;
+      try { created.push({ id: b.id, url: await ghCreateIssue(b, baseUrl) }); }
+      catch(e){ failed.push({ id: b.id, error: String(e.message||e) }); }
+    }
+    res.json({ ok: true, total: bugs.length, already: have.size, created, failed });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
 const port = process.env.PORT || 3000;

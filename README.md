@@ -22,6 +22,22 @@
 - Все баги: https://github.com/victorkrivenko4949-commits/lavrik-bugs/issues?q=is%3Aissue+is%3Aopen+label%3Abug
 - Чтобы агент починил: скажите «посмотри баги Лаврика» — агент прочитает открытые issue, скачает скрины по ссылкам из текста, исправит в нужном репозитории (например FORMYLA) и отпишется в issue.
 
+## Дублирование багов в GitHub Issues (чтобы агент их видел)
+
+Сервер сохраняет баг в Supabase **и** создаёт issue в этом репозитории. Агент читает issues через GitHub.
+
+Настройка на Render (сервис `lavrik-bugs` → Environment):
+
+1. `GITHUB_TOKEN` — fine-grained токен GitHub: Settings → Developer settings → Fine-grained tokens → репозиторий `lavrik-bugs`, право **Issues: Read and write**.
+2. `SUPABASE_SERVICE_KEY` — ключ `service_role` из Supabase (Project Settings → API). Нужен, чтобы сервер читал таблицу `bugs` после отключения публичной SELECT-политики.
+3. `ADMIN_KEY` — любой пароль для служебных ссылок.
+4. Сохранить → Render перезапустит сервис.
+
+Перенести уже отправленные баги в Issues: один раз открыть в браузере
+`https://<адрес-сервиса>/api/sync-issues?key=<ADMIN_KEY>` — создадутся issues для всех багов, которых ещё нет (повторный вызов дублей не делает).
+
+Проверка: `https://<адрес-сервиса>/api/config` должен показать `"github": true`.
+
 ## Как это устроено
 
 | Файл | Что делает |
@@ -29,3 +45,4 @@
 | `index.html` | Страница для телефона: голосовой ввод (Web Speech API, ru-RU) → предзаполненная форма на GitHub |
 | `.github/ISSUE_TEMPLATE/bug.yml` | Форма бага на русском: где, что, как повторить, ссылка, важность |
 | `.github/workflows/auto-reply.yml` | Автоответ «Принято» + метка `bug` на каждый новый баг |
+| `server.js` | Приём бага → Supabase → дублирование в GitHub Issues; `/api/sync-issues` переносит старые баги |
