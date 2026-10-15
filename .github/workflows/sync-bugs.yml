@@ -1,0 +1,71 @@
+name: Баги Лаврика → Issues
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: lavrik-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          BUGS_URL: https://lavrik-bugs.onrender.com
+        with:
+          script: |
+            const base = process.env.BUGS_URL;
+            const r = await fetch(base + '/api/bugs', { headers: { 'Accept': 'application/json' } });
+            if (!r.ok) throw new Error('bugs api: ' + r.status + ' ' + await r.text());
+            const bugs = await r.json();
+            core.info('bugs in db: ' + bugs.length);
+
+            const have = new Set();
+            for await (const page of github.paginate.iterator(github.rest.issues.listForRepo, {
+              owner: context.repo.owner, repo: context.repo.repo, state: 'all', per_page: 100
+            })) {
+              for (const it of page.data) {
+                const m = /lavrik-bug-id:(\d+)/.exec(it.body || '');
+                if (m) have.add(Number(m[1]));
+              }
+            }
+            core.info('already in issues: ' + have.size);
+
+            const fmt = d => d ? new Date(d).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+            let created = 0;
+            for (const b of [...bugs].reverse()) {
+              if (have.has(Number(b.id))) continue;
+              const text = String(b.chto || '').replace(/\s+/g, ' ').trim();
+              const title = `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${text.slice(0, 70)}${text.length > 70 ? '…' : ''}`;
+              const lines = [
+                `<!-- lavrik-bug-id:${b.id} -->`,
+                `**Где сломалось:** ${b.razdel || '—'}`,
+                `**Важность:** ${b.vazhnost || '—'}`,
+                `**Статус в базе:** ${b.status || 'new'}`,
+                `**Отправлено:** ${fmt(b.created_at)}`,
+                '', '### Что случилось', b.chto || '—'
+              ];
+              if (b.kak) lines.push('', '### Как повторить', b.kak);
+              if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
+              if (b.skrin) lines.push('', `📸 Есть скриншот — открыть: ${base}/admin.html#bug-${b.id}`);
+              lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано GitHub Actions._`);
+              const labels = ['bug'];
+              const v = String(b.vazhnost || '');
+              if (v.startsWith('🔴')) labels.push('критично');
+              else if (v.startsWith('🟢')) labels.push('мелочь');
+              if (b.razdel) labels.push(String(b.razdel).slice(0, 50));
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body: lines.join('\n'), labels
+              });
+              created++;
+            }
+            core.info('created: ' + created);
