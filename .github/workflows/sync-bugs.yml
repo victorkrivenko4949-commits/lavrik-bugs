@@ -7,7 +7,7 @@ on:
 
 permissions:
   issues: write
-  contents: read
+  contents: write
 
 concurrency:
   group: lavrik-sync
@@ -23,18 +23,56 @@ jobs:
         with:
           script: |
             const base = process.env.BUGS_URL;
+            const owner = context.repo.owner, repo = context.repo.repo;
             const r = await fetch(base + '/api/bugs', { headers: { 'Accept': 'application/json' } });
             if (!r.ok) throw new Error('bugs api: ' + r.status + ' ' + await r.text());
             const bugs = await r.json();
             core.info('bugs in db: ' + bugs.length);
 
-            const have = new Set();
+            // Ветка по умолчанию — туда кладём скриншоты (папка screenshots/).
+            const { data: repoInfo } = await github.rest.repos.get({ owner, repo });
+            const branch = repoInfo.default_branch;
+            const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/screenshots`;
+
+            // Скриншот в Supabase хранится как data:image/...;base64. Сохраняем его
+            // файлом screenshots/bug-N.ext в репозитории и возвращаем прямую ссылку,
+            // чтобы картинка была видна прямо в issue и не зависела от Render.
+            async function saveScreenshot(b) {
+              const m = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(b.skrin || '');
+              if (!m) return null;
+              const ext = m[1] === 'jpeg' ? 'jpg' : m[1];
+              const path = `screenshots/bug-${b.id}.${ext}`;
+              const url = `${rawBase}/bug-${b.id}.${ext}`;
+              try {
+                await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+                return url; // уже сохранён
+              } catch (e) {
+                if (e.status !== 404) throw e;
+              }
+              await github.rest.repos.createOrUpdateFileContents({
+                owner, repo, path, branch,
+                message: `screenshot: bug #${b.id}`,
+                content: m[2]
+              });
+              core.info('saved ' + path);
+              return url;
+            }
+
+            function screenshotLines(b, url) {
+              return [
+                '', '### Скриншот',
+                `![Скриншот бага #${b.id}](${url})`,
+                `Также доступен в админке: ${base}/admin.html#bug-${b.id}`
+              ];
+            }
+
+            const have = new Map(); // bug id -> issue
             for await (const page of github.paginate.iterator(github.rest.issues.listForRepo, {
-              owner: context.repo.owner, repo: context.repo.repo, state: 'all', per_page: 100
+              owner, repo, state: 'all', per_page: 100
             })) {
               for (const it of page.data) {
                 const m = /lavrik-bug-id:(\d+)/.exec(it.body || '');
-                if (m) have.add(Number(m[1]));
+                if (m) have.set(Number(m[1]), it);
               }
             }
             core.info('already in issues: ' + have.size);
@@ -55,17 +93,39 @@ jobs:
               ];
               if (b.kak) lines.push('', '### Как повторить', b.kak);
               if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
-              if (b.skrin) lines.push('', `📸 Есть скриншот — открыть: ${base}/admin.html#bug-${b.id}`);
+              if (b.skrin) {
+                let url = null;
+                try { url = await saveScreenshot(b); }
+                catch (e) { core.warning(`screenshot for bug #${b.id} failed: ${e.message}`); }
+                if (url) lines.push(...screenshotLines(b, url));
+                else lines.push('', `📸 Есть скриншот — открыть: ${base}/admin.html#bug-${b.id}`);
+              }
               lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано GitHub Actions._`);
               const labels = ['bug'];
               const v = String(b.vazhnost || '');
               if (v.startsWith('🔴')) labels.push('критично');
               else if (v.startsWith('🟢')) labels.push('мелочь');
               if (b.razdel) labels.push(String(b.razdel).slice(0, 50));
-              await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body: lines.join('\n'), labels
-              });
+              await github.rest.issues.create({ owner, repo, title, body: lines.join('\n'), labels });
               created++;
             }
             core.info('created: ' + created);
+
+            // Дозаполнение: у уже созданных issues со скриншотом, но без картинки
+            // в теле, добавляем раздел «Скриншот».
+            let backfilled = 0;
+            for (const b of bugs) {
+              const it = have.get(Number(b.id));
+              if (!it || !b.skrin) continue;
+              if ((it.body || '').includes(`screenshots/bug-${b.id}.`)) continue;
+              let url = null;
+              try { url = await saveScreenshot(b); }
+              catch (e) { core.warning(`backfill screenshot for bug #${b.id} failed: ${e.message}`); }
+              if (!url) continue;
+              await github.rest.issues.update({
+                owner, repo, issue_number: it.number,
+                body: (it.body || '') + '\n' + screenshotLines(b, url).join('\n')
+              });
+              backfilled++;
+            }
+            core.info('backfilled screenshots: ' + backfilled);
