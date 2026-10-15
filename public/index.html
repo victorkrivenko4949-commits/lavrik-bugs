@@ -26,9 +26,31 @@
   .preview{margin-top:8px;max-width:100%;border-radius:8px;max-height:200px}
   .spinner{display:inline-block;width:16px;height:16px;border:3px solid #fff;border-top-color:transparent;border-radius:50%;vertical-align:-3px;margin-right:8px;animation:spin 1s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
+  .inbox-banner{max-width:560px;margin:0 auto 14px;background:#fff7e0;border:2px solid #f4a259;border-radius:14px;padding:14px 16px;display:none;align-items:center;gap:12px;cursor:pointer;font-weight:700;font-size:17px}
+  .inbox-banner .cnt{background:#c0392b;color:#fff;border-radius:999px;min-width:28px;height:28px;display:grid;place-items:center;font-size:15px;padding:0 8px}
+  .inbox{max-width:560px;margin:14px auto 0;display:none}
+  .inbox h2{font-size:20px;margin:0 0 10px}
+  .q{background:#fff;border-radius:16px;padding:16px;box-shadow:0 2px 12px rgba(0,0,0,.08);margin-bottom:12px;border-left:6px solid #d0d5e0}
+  .q.wait{border-left-color:#f4a259}
+  .q.new{border-left-color:#c0392b}
+  .q .bug{font-size:13px;color:#777;margin-bottom:6px}
+  .q .ttl{font-weight:700;margin-bottom:10px}
+  .msg{border-radius:12px;padding:10px 12px;margin:8px 0;font-size:15px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+  .msg.agent{background:#eef3ff}
+  .msg.lavrik{background:#e6f9e8;margin-left:24px}
+  .msg .who{font-size:12px;color:#777;margin-bottom:4px;font-weight:600}
+  .msg a{color:#1a4fd6}
+  .q textarea{min-height:80px;margin-top:8px}
+  .q .btn{font-size:17px;padding:12px;margin-top:8px}
+  .q .done{color:#0d6e1c;font-weight:600;margin-top:8px;font-size:15px}
+  .q .answered{color:#0d6e1c;font-size:14px;margin-top:6px}
+  .inbox .empty{color:#777;text-align:center;padding:14px}
 </style>
 </head>
 <body>
+<div class="inbox-banner" id="inboxBanner" onclick="document.getElementById('inbox').scrollIntoView({behavior:'smooth'})">
+  <span class="cnt" id="inboxCnt">0</span><span>💬 Агент задал тебе вопросы — ответь, чтобы он починил баг</span>
+</div>
 <div class="card">
   <h1>🐞 Что сломалось, Лаврик?</h1>
   <p class="hint">Нажми микрофон и расскажи. Или напиши. Можно приложить скриншот. Потом — «Отправить».</p>
@@ -70,6 +92,11 @@
 
   <div class="ok" id="okmsg" style="display:none">✅ <span id="oktext">Обращение №… сохранено</span></div>
   <div class="err" id="errmsg" style="display:none">⚠️ <span id="errtext"></span></div>
+</div>
+
+<div class="inbox" id="inbox">
+  <h2>💬 Вопросы от агента</h2>
+  <div id="inboxList"></div>
 </div>
 
 <script>
@@ -174,6 +201,87 @@ document.getElementById('send').onclick = async () => {
     btn.textContent = prev;
   }
 };
+
+/* ---------- Входящие вопросы агента ---------- */
+const SEEN_KEY = 'lb_seen_comment_ids';
+const seen = new Set(JSON.parse(localStorage.getItem(SEEN_KEY) || '[]'));
+function saveSeen(){ localStorage.setItem(SEEN_KEY, JSON.stringify([...seen].slice(-500))); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]); }
+function fmt(s){
+  return esc(s).replace(/(https?:\/\/[^\s)]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+               .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+}
+function when(iso){ try { return new Date(iso).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}); } catch(_){ return ''; } }
+
+let notifyAsked = false;
+function maybeNotify(newCount){
+  if (!('Notification' in window) || newCount <= 0) return;
+  if (Notification.permission === 'granted') {
+    new Notification('Лаврик, тебе ' + newCount + ' новых вопрос(а) от агента', { body: 'Открой страницу багов и ответь' });
+  } else if (Notification.permission === 'default' && !notifyAsked) {
+    notifyAsked = true; Notification.requestPermission();
+  }
+}
+
+async function loadInbox(fresh){
+  const banner = document.getElementById('inboxBanner');
+  const box = document.getElementById('inbox');
+  const list = document.getElementById('inboxList');
+  try {
+    const r = await fetch('/api/inbox' + (fresh ? '?fresh=1' : ''));
+    const j = await r.json();
+    if (!j.ok || j.disabled) return;
+    const items = j.items || [];
+    if (!items.length) { banner.style.display='none'; box.style.display='none'; return; }
+    box.style.display = 'block';
+    let newCount = 0;
+    list.innerHTML = items.map(it => {
+      const unseen = it.thread.some(m => m.from==='agent' && !seen.has(m.id));
+      if (it.waiting && unseen) newCount++;
+      const cls = it.waiting ? (unseen ? 'q new' : 'q wait') : 'q';
+      const thread = it.thread.map(m => `<div class="msg ${m.from}"><div class="who">${m.from==='agent'?'🤖 Агент':'🧑 Ты'} · ${when(m.at)}</div>${fmt(m.text)}</div>`).join('');
+      const form = it.waiting
+        ? `<textarea id="ans-${it.issue}" placeholder="Напиши ответ: где именно, что не так, как должно быть…"></textarea>
+           <button class="btn send" onclick="sendReply(${it.issue})" id="btn-${it.issue}">Ответить агенту ➜</button>
+           <div id="res-${it.issue}"></div>`
+        : `<div class="answered">✅ Ты ответил. Агент прочитает и продолжит.</div>
+           <textarea id="ans-${it.issue}" placeholder="Хочешь добавить ещё что-то?" style="min-height:56px"></textarea>
+           <button class="btn mic" onclick="sendReply(${it.issue})" id="btn-${it.issue}">Дописать</button>
+           <div id="res-${it.issue}"></div>`;
+      return `<div class="${cls}" id="q-${it.issue}"><div class="bug">Баг #${it.bug_id}${unseen&&it.waiting?' · <b style="color:#c0392b">НОВЫЙ ВОПРОС</b>':''}</div><div class="ttl">${esc(it.title)}</div>${thread}${form}</div>`;
+    }).join('');
+    const waiting = items.filter(i => i.waiting).length;
+    document.getElementById('inboxCnt').textContent = waiting;
+    banner.style.display = waiting ? 'flex' : 'none';
+    document.title = (waiting ? '(' + waiting + ') ' : '') + 'Сообщить об ошибке';
+    maybeNotify(newCount);
+    items.forEach(it => it.thread.forEach(m => { if (m.from==='agent') seen.add(m.id); }));
+    saveSeen();
+  } catch(e) { /* сеть недоступна — тихо */ }
+}
+
+async function sendReply(issue){
+  const ta = document.getElementById('ans-' + issue);
+  const btn = document.getElementById('btn-' + issue);
+  const res = document.getElementById('res-' + issue);
+  const text = (ta.value || '').trim();
+  if (!text) { ta.focus(); res.innerHTML = '<div class="err">Сначала напиши ответ.</div>'; return; }
+  btn.disabled = true; const prev = btn.textContent; btn.innerHTML = '<span class="spinner"></span>Отправляем…';
+  try {
+    const r = await fetch('/api/inbox/' + issue + '/reply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || 'Сервер ответил ошибкой ' + r.status);
+    res.innerHTML = '<div class="done">✅ Ответ отправлен агенту. Спасибо!</div>';
+    ta.value = '';
+    setTimeout(() => loadInbox(true), 800);
+  } catch(e) {
+    res.innerHTML = '<div class="err">Не отправилось: ' + esc(e.message||e) + '</div>';
+  } finally { btn.disabled = false; btn.textContent = prev; }
+}
+
+loadInbox(false);
+setInterval(() => loadInbox(false), 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) loadInbox(false); });
 </script>
 </body>
 </html>

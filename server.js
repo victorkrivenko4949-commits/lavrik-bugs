@@ -203,5 +203,110 @@ app.get('/api/sync-issues', async (req,res) => {
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
+// ---------- Входящие вопросы агента (двусторонняя связь с Лавриком) ----------
+const REPLY_MARK = '<!-- lavrik-reply -->';
+const INBOX_TTL_MS = 60 * 1000;
+let _inboxCache = { at: 0, data: null };
+
+function isAgentQuestion(c){
+  const b = String(c.body || '');
+  if (b.includes(REPLY_MARK)) return false;            // ответ самого Лаврика
+  if (b.trim().startsWith('✅ Принято')) return false;  // автоответ бота
+  if ((c.user && c.user.type) === 'Bot') return false;
+  return true;
+}
+
+async function ghListOpenBugIssues(){
+  const out = [];
+  for (let page = 1; page <= 5; page++) {
+    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues?state=open&per_page=100&page=${page}`, { headers: ghHeaders() });
+    if (!r.ok) throw new Error('github issues: ' + r.status + ' ' + await r.text());
+    const arr = await r.json();
+    for (const it of arr) {
+      if (it.pull_request) continue;
+      const m = /lavrik-bug-id:(\d+)/.exec(it.body || '');
+      if (m) out.push({ number: it.number, bug_id: Number(m[1]), title: it.title, html_url: it.html_url });
+    }
+    if (arr.length < 100) break;
+  }
+  return out;
+}
+
+async function ghIssueComments(n){
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues/${n}/comments?per_page=100`, { headers: ghHeaders() });
+  if (!r.ok) throw new Error('github comments: ' + r.status + ' ' + await r.text());
+  return r.json();
+}
+
+async function buildInbox(){
+  const issues = await ghListOpenBugIssues();
+  const items = [];
+  for (const it of issues) {
+    const comments = await ghIssueComments(it.number);
+    const thread = comments
+      .filter(c => isAgentQuestion(c) || String(c.body||'').includes(REPLY_MARK))
+      .map(c => ({
+        id: c.id,
+        from: String(c.body||'').includes(REPLY_MARK) ? 'lavrik' : 'agent',
+        text: String(c.body||'').replace(REPLY_MARK, '').replace(/^\s*\*\*💬 Ответ Лаврика:\*\*\s*/,'').trim(),
+        at: c.created_at
+      }));
+    const questions = thread.filter(t => t.from === 'agent');
+    if (!questions.length) continue;
+    const last = thread[thread.length - 1];
+    items.push({
+      issue: it.number,
+      bug_id: it.bug_id,
+      title: it.title.replace(/^\[Баг #\d+\]\s*/, ''),
+      url: it.html_url,
+      thread,
+      waiting: last.from === 'agent',   // агент ждёт ответа
+      last_at: last.at
+    });
+  }
+  items.sort((a,b) => (b.waiting - a.waiting) || (new Date(b.last_at) - new Date(a.last_at)));
+  return items;
+}
+
+app.get('/api/inbox', async (req,res) => {
+  if (!GH_TOKEN) return res.json({ ok: true, items: [], disabled: true });
+  try {
+    const now = Date.now();
+    if (!_inboxCache.data || now - _inboxCache.at > INBOX_TTL_MS || req.query.fresh === '1') {
+      _inboxCache = { at: now, data: await buildInbox() };
+    }
+    res.json({ ok: true, items: _inboxCache.data, waiting: _inboxCache.data.filter(i => i.waiting).length });
+  } catch(e){ res.status(500).json({ ok:false, error: String(e.message||e) }); }
+});
+
+const _replyHits = new Map(); // ip -> [timestamps]
+function replyRateOk(ip){
+  const now = Date.now(), arr = (_replyHits.get(ip) || []).filter(t => now - t < 10*60*1000);
+  arr.push(now); _replyHits.set(ip, arr);
+  return arr.length <= 20;
+}
+
+app.post('/api/inbox/:issue/reply', async (req,res) => {
+  if (!GH_TOKEN) return res.status(500).json({ error: 'GITHUB_TOKEN not set' });
+  const n = Number(req.params.issue);
+  const text = sanitizeText((req.body||{}).text, 3000).trim();
+  if (!Number.isInteger(n) || n <= 0) return res.status(400).json({ error: 'bad issue' });
+  if (!text) return res.status(400).json({ error: 'Пустой ответ' });
+  if (!replyRateOk(req.ip)) return res.status(429).json({ error: 'Слишком много ответов подряд, подожди минуту' });
+  try {
+    const ir = await fetch(`https://api.github.com/repos/${GH_REPO}/issues/${n}`, { headers: ghHeaders() });
+    if (!ir.ok) throw new Error('github issue: ' + ir.status);
+    const issue = await ir.json();
+    if (!/lavrik-bug-id:\d+/.test(issue.body || '')) return res.status(403).json({ error: 'Это не баг Лаврика' });
+    const body = `${REPLY_MARK}\n**💬 Ответ Лаврика:**\n\n${text}`;
+    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues/${n}/comments`, {
+      method: 'POST', headers: ghHeaders(), body: JSON.stringify({ body })
+    });
+    if (!r.ok) throw new Error('github comment: ' + r.status + ' ' + await r.text());
+    _inboxCache = { at: 0, data: null }; // сбросить кэш
+    res.json({ ok: true });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log('lavrik-bugs on ' + port));
