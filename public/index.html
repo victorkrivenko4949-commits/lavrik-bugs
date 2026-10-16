@@ -239,7 +239,7 @@ async function loadInbox(fresh){
       const unseen = it.thread.some(m => m.from==='agent' && !seen.has(m.id));
       if (it.waiting && unseen) newCount++;
       const cls = it.waiting ? (unseen ? 'q new' : 'q wait') : 'q';
-      const thread = it.thread.map(m => `<div class="msg ${m.from}"><div class="who">${m.from==='agent'?'🤖 Агент':'🧑 Ты'} · ${when(m.at)}</div>${fmt(m.text)}</div>`).join('');
+      const thread = it.thread.map(m => `<div class="msg ${m.from}"><div class="who">${m.from==='agent'?'🤖 Агент':'🧑 Ты'} · ${when(m.at)}${m.pending?' · ⏳ доставляется':''}</div>${fmt(m.text)}</div>`).join('');
       const form = it.waiting
         ? `<textarea id="ans-${it.issue}" placeholder="Напиши ответ: где именно, что не так, как должно быть…"></textarea>
            <button class="btn send" onclick="sendReply(${it.issue})" id="btn-${it.issue}">Ответить агенту ➜</button>
@@ -271,7 +271,7 @@ async function sendReply(issue){
     const r = await fetch('/api/inbox/' + issue + '/reply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || 'Сервер ответил ошибкой ' + r.status);
-    res.innerHTML = '<div class="done">✅ Ответ отправлен агенту. Спасибо!</div>';
+    res.innerHTML = '<div class="done">✅ Ответ принят' + (j.via==='direct' ? ' и уже у агента.' : '. Агент получит его в течение 10 минут.') + ' Спасибо!</div>';
     ta.value = '';
     setTimeout(() => loadInbox(true), 800);
   } catch(e) {
