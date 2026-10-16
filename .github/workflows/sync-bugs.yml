@@ -26,8 +26,11 @@ jobs:
             const owner = context.repo.owner, repo = context.repo.repo;
             const r = await fetch(base + '/api/bugs', { headers: { 'Accept': 'application/json' } });
             if (!r.ok) throw new Error('bugs api: ' + r.status + ' ' + await r.text());
-            const bugs = await r.json();
-            core.info('bugs in db: ' + bugs.length);
+            const all = await r.json();
+            // Строки со status='reply' — ответы Лаврика агенту, а не баги.
+            const replies = all.filter(b => b.status === 'reply');
+            const bugs = all.filter(b => b.status !== 'reply');
+            core.info('bugs in db: ' + bugs.length + ', replies: ' + replies.length);
 
             // Ветка по умолчанию — туда кладём скриншоты (папка screenshots/).
             const { data: repoInfo } = await github.rest.repos.get({ owner, repo });
@@ -129,3 +132,31 @@ jobs:
               backfilled++;
             }
             core.info('backfilled screenshots: ' + backfilled);
+
+            // Ответы Лаврика агенту: публикуем комментарием в issue (kak = 'issue:N').
+            // Идемпотентно: метка <!-- lavrik-reply:ID --> защищает от дублей.
+            let posted = 0;
+            const commentsCache = new Map();
+            async function issueComments(n) {
+              if (commentsCache.has(n)) return commentsCache.get(n);
+              const list = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: n, per_page: 100 });
+              commentsCache.set(n, list);
+              return list;
+            }
+            for (const rep of [...replies].reverse()) {
+              const m = /^issue:(\d+)$/.exec(String(rep.kak || ''));
+              if (!m) continue;
+              const n = Number(m[1]);
+              const mark = `<!-- lavrik-reply:${rep.id} -->`;
+              let comments;
+              try { comments = await issueComments(n); }
+              catch (e) { core.warning(`reply #${rep.id}: issue ${n} unavailable: ${e.message}`); continue; }
+              if (comments.some(c => (c.body || '').includes(mark))) continue;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: n,
+                body: `${mark}\n**💬 Ответ Лаврика:**\n\n${rep.chto || ''}`
+              });
+              commentsCache.delete(n);
+              posted++;
+            }
+            core.info('replies posted: ' + posted);

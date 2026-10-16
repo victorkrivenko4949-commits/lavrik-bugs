@@ -195,6 +195,7 @@ app.get('/api/sync-issues', async (req,res) => {
     const created = [], failed = [];
     const baseUrl = baseUrlOf(req);
     for (const b of [...bugs].reverse()) { // старые первыми — чтобы номера issue шли по порядку
+      if (b.status === 'reply') continue; // ответы Лаврика — не баги
       if (have.has(Number(b.id))) continue;
       try { created.push({ id: b.id, url: await ghCreateIssue(b, baseUrl) }); }
       catch(e){ failed.push({ id: b.id, error: String(e.message||e) }); }
@@ -204,16 +205,24 @@ app.get('/api/sync-issues', async (req,res) => {
 });
 
 // ---------- Входящие вопросы агента (двусторонняя связь с Лавриком) ----------
-const REPLY_MARK = '<!-- lavrik-reply -->';
+// Ответ Лаврика сохраняется в Supabase строкой со status='reply' и kak='issue:N'.
+// Workflow sync-bugs.yml (GitHub Actions, свой токен с правом записи) публикует его
+// комментарием в issue с меткой <!-- lavrik-reply:ID -->. Если GITHUB_TOKEN сервера
+// умеет писать — комментарий ставится сразу, без ожидания workflow.
+const REPLY_PREFIX = '<!-- lavrik-reply';
 const INBOX_TTL_MS = 60 * 1000;
 let _inboxCache = { at: 0, data: null };
 
+function isReply(body){ return String(body || '').includes(REPLY_PREFIX); }
 function isAgentQuestion(c){
   const b = String(c.body || '');
-  if (b.includes(REPLY_MARK)) return false;            // ответ самого Лаврика
+  if (isReply(b)) return false;                         // ответ самого Лаврика
   if (b.trim().startsWith('✅ Принято')) return false;  // автоответ бота
   if ((c.user && c.user.type) === 'Bot') return false;
   return true;
+}
+function stripReply(body){
+  return String(body || '').replace(/<!--\s*lavrik-reply[^>]*-->/g, '').replace(/^\s*\*\*💬 Ответ Лаврика:\*\*\s*/,'').trim();
 }
 
 async function ghListOpenBugIssues(){
@@ -238,19 +247,36 @@ async function ghIssueComments(n){
   return r.json();
 }
 
+async function pendingReplies(){
+  if (!SUPA_URL) return [];
+  try {
+    const bugs = await supaSelectBugs();
+    return bugs.filter(b => b.status === 'reply' && /^issue:\d+$/.test(String(b.kak || '')));
+  } catch(e){ console.error('pendingReplies:', e.message); return []; }
+}
+
 async function buildInbox(){
   const issues = await ghListOpenBugIssues();
+  const queued = await pendingReplies();
   const items = [];
   for (const it of issues) {
     const comments = await ghIssueComments(it.number);
     const thread = comments
-      .filter(c => isAgentQuestion(c) || String(c.body||'').includes(REPLY_MARK))
+      .filter(c => isAgentQuestion(c) || isReply(c.body))
       .map(c => ({
         id: c.id,
-        from: String(c.body||'').includes(REPLY_MARK) ? 'lavrik' : 'agent',
-        text: String(c.body||'').replace(REPLY_MARK, '').replace(/^\s*\*\*💬 Ответ Лаврика:\*\*\s*/,'').trim(),
+        from: isReply(c.body) ? 'lavrik' : 'agent',
+        text: isReply(c.body) ? stripReply(c.body) : String(c.body||'').trim(),
         at: c.created_at
       }));
+    // Ответы, которые уже в Supabase, но ещё не опубликованы workflow
+    const delivered = new Set();
+    for (const c of comments) { const m = /lavrik-reply:(\d+)/.exec(c.body || ''); if (m) delivered.add(Number(m[1])); }
+    for (const q of queued) {
+      if (q.kak !== `issue:${it.number}` || delivered.has(Number(q.id))) continue;
+      thread.push({ id: 'q' + q.id, from: 'lavrik', text: String(q.chto || ''), at: q.created_at, pending: true });
+    }
+    thread.sort((a,b) => new Date(a.at) - new Date(b.at));
     const questions = thread.filter(t => t.from === 'agent');
     if (!questions.length) continue;
     const last = thread[thread.length - 1];
@@ -298,13 +324,30 @@ app.post('/api/inbox/:issue/reply', async (req,res) => {
     if (!ir.ok) throw new Error('github issue: ' + ir.status);
     const issue = await ir.json();
     if (!/lavrik-bug-id:\d+/.test(issue.body || '')) return res.status(403).json({ error: 'Это не баг Лаврика' });
-    const body = `${REPLY_MARK}\n**💬 Ответ Лаврика:**\n\n${text}`;
-    const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues/${n}/comments`, {
-      method: 'POST', headers: ghHeaders(), body: JSON.stringify({ body })
+
+    // 1) Очередь в Supabase — её публикует workflow (надёжно, не зависит от прав токена)
+    const sr = await fetch(SUPA_URL + '/rest/v1/bugs', {
+      method: 'POST',
+      headers: supaHeaders(SUPA_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
+      body: JSON.stringify({
+        razdel: 'Ответ агенту', chto: text, kak: `issue:${n}`, ssylka: issue.html_url || '',
+        vazhnost: '🟢 Мелочь', skrin: null, status: 'reply'
+      })
     });
-    if (!r.ok) throw new Error('github comment: ' + r.status + ' ' + await r.text());
-    _inboxCache = { at: 0, data: null }; // сбросить кэш
-    res.json({ ok: true });
+    if (!sr.ok) throw new Error('supabase: ' + sr.status + ' ' + await sr.text());
+    const row = (await sr.json())[0] || {};
+
+    // 2) Если токен сервера умеет писать — публикуем сразу (не обязательно)
+    let via = 'queue';
+    if (row.id) {
+      const body = `<!-- lavrik-reply:${row.id} -->\n**💬 Ответ Лаврика:**\n\n${text}`;
+      const r = await fetch(`https://api.github.com/repos/${GH_REPO}/issues/${n}/comments`, {
+        method: 'POST', headers: ghHeaders(), body: JSON.stringify({ body })
+      });
+      if (r.ok) via = 'direct';
+    }
+    _inboxCache = { at: 0, data: null };
+    res.json({ ok: true, via });
   } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
