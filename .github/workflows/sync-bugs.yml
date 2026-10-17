@@ -21,10 +21,12 @@ jobs:
         env:
           BUGS_URL: https://lavrik-bugs.onrender.com
           # VISION_V1: авто-описание скриншотов текстом, чтобы агент «видел» картинку.
-          # Секрет OPENROUTER_API_KEY добавьте в Settings → Secrets and variables → Actions.
-          # Модель можно переопределить переменной репозитория VISION_MODEL. Без ключа шаг пропускается.
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          VISION_MODEL: ${{ vars.VISION_MODEL || 'google/gemini-2.5-flash' }}
+          # Используется DeepSeek (тот же провайдер, что у наставника атласа и тьютора каталога в FORMYLA).
+          # Секрет DEEPSEEK_API_KEY добавьте в Settings → Secrets and variables → Actions.
+          # Модель/адрес можно переопределить переменными VISION_MODEL / VISION_API_BASE. Без ключа шаг пропускается.
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          VISION_API_BASE: ${{ vars.VISION_API_BASE || 'https://api.deepseek.com/v1' }}
+          VISION_MODEL: ${{ vars.VISION_MODEL || 'deepseek-v4-flash-vision-exp' }}
         with:
           script: |
             const base = process.env.BUGS_URL;
@@ -76,14 +78,16 @@ jobs:
 
             // ---------- VISION_V1: текстовое описание скриншота ----------
             // Агент, который чинит баги через GitHub, картинки не видит. Поэтому каждый
-            // скриншот один раз прогоняем через vision-модель и кладём описание в тело
-            // issue. Идемпотентно по заголовку VISION_HEAD. Ошибка не ломает синхронизацию.
-            const VISION_KEY = process.env.OPENROUTER_API_KEY || '';
-            const VISION_MODEL = process.env.VISION_MODEL || 'google/gemini-2.5-flash';
+            // скриншот один раз прогоняем через vision-модель DeepSeek (OpenAI-совместимый API)
+            // и кладём описание в тело issue. Идемпотентно по заголовку VISION_HEAD.
+            // Ошибка не ломает синхронизацию.
+            const VISION_KEY = process.env.DEEPSEEK_API_KEY || '';
+            const VISION_BASE = (process.env.VISION_API_BASE || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+            const VISION_MODEL = process.env.VISION_MODEL || 'deepseek-v4-flash-vision-exp';
             const VISION_MAX_PER_RUN = 8;
             const VISION_HEAD = '### Что на скриншоте (авто-описание ИИ)';
             let visionUsed = 0;
-            if (!VISION_KEY) core.info('vision: OPENROUTER_API_KEY не задан — описания скриншотов пропущены');
+            if (!VISION_KEY) core.info('vision: DEEPSEEK_API_KEY не задан — описания скриншотов пропущены');
 
             function visionPrompt(b) {
               return [
@@ -119,13 +123,11 @@ jobs:
                   ]
                 }]
               };
-              const rr = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              const rr = await fetch(VISION_BASE + '/chat/completions', {
                 method: 'POST',
                 headers: {
                   'Authorization': 'Bearer ' + VISION_KEY,
-                  'Content-Type': 'application/json',
-                  'HTTP-Referer': base,
-                  'X-Title': 'lavrik-bugs'
+                  'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(payload)
               });
