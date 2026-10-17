@@ -20,6 +20,11 @@ jobs:
       - uses: actions/github-script@v7
         env:
           BUGS_URL: https://lavrik-bugs.onrender.com
+          # VISION_V1: авто-описание скриншотов текстом, чтобы агент «видел» картинку.
+          # Секрет OPENROUTER_API_KEY добавьте в Settings → Secrets and variables → Actions.
+          # Модель можно переопределить переменной репозитория VISION_MODEL. Без ключа шаг пропускается.
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          VISION_MODEL: ${{ vars.VISION_MODEL || 'google/gemini-2.5-flash' }}
         with:
           script: |
             const base = process.env.BUGS_URL;
@@ -69,6 +74,87 @@ jobs:
               ];
             }
 
+            // ---------- VISION_V1: текстовое описание скриншота ----------
+            // Агент, который чинит баги через GitHub, картинки не видит. Поэтому каждый
+            // скриншот один раз прогоняем через vision-модель и кладём описание в тело
+            // issue. Идемпотентно по заголовку VISION_HEAD. Ошибка не ломает синхронизацию.
+            const VISION_KEY = process.env.OPENROUTER_API_KEY || '';
+            const VISION_MODEL = process.env.VISION_MODEL || 'google/gemini-2.5-flash';
+            const VISION_MAX_PER_RUN = 8;
+            const VISION_HEAD = '### Что на скриншоте (авто-описание ИИ)';
+            let visionUsed = 0;
+            if (!VISION_KEY) core.info('vision: OPENROUTER_API_KEY не задан — описания скриншотов пропущены');
+
+            function visionPrompt(b) {
+              return [
+                'Ты помогаешь разработчику сайта FORMYLA.net (подготовка школьников к олимпиадам по математике) разобрать баг-репорт от школьника-тестировщика.',
+                'Разработчик НЕ видит картинку — опиши скриншот так, чтобы он понял всё без неё. Отвечай по-русски, строго по пунктам, без вступлений:',
+                '1. **Страница/раздел** — что это за экран (заголовки, пункты меню, URL если виден, модальное окно или страница).',
+                '2. **Весь видимый текст дословно** — кнопки, подписи полей, сообщения, формулы (сырой LaTeX переписывай как есть), сверху вниз.',
+                '3. **Что выделено** — обводки, стрелки, подчёркивания, на какой элемент указывает тестировщик (если нет — так и напиши).',
+                '4. **Что выглядит сломанным** — сырой LaTeX, съехавшая вёрстка, пустое поле, неверный чертёж, не тот экран и т.п. Свяжи с текстом бага ниже.',
+                '5. **Устройство** — телефон или компьютер, тёмная или светлая тема.',
+                '',
+                `Текст бага от тестировщика: «${String(b.chto || '').slice(0, 1500)}»`,
+                b.kak ? `Как повторить (по его словам): «${String(b.kak).slice(0, 800)}»` : '',
+                b.ssylka ? `Ссылка на страницу: ${b.ssylka}` : '',
+                b.razdel ? `Раздел по мнению тестировщика: ${b.razdel}` : ''
+              ].filter(Boolean).join('\n');
+            }
+
+            async function describeScreenshot(b) {
+              if (!VISION_KEY || !b.skrin) return null;
+              if (visionUsed >= VISION_MAX_PER_RUN) return null;
+              if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(b.skrin)) return null;
+              visionUsed++;
+              const payload = {
+                model: VISION_MODEL,
+                max_tokens: 1000,
+                temperature: 0.2,
+                messages: [{
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: visionPrompt(b) },
+                    { type: 'image_url', image_url: { url: b.skrin } }
+                  ]
+                }]
+              };
+              const rr = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Authorization': 'Bearer ' + VISION_KEY,
+                  'Content-Type': 'application/json',
+                  'HTTP-Referer': base,
+                  'X-Title': 'lavrik-bugs'
+                },
+                body: JSON.stringify(payload)
+              });
+              if (!rr.ok) {
+                core.warning(`vision for bug #${b.id}: ${rr.status} ${(await rr.text()).slice(0, 300)}`);
+                return null;
+              }
+              const j = await rr.json();
+              const msg = (((j.choices || [])[0] || {}).message || {}).content;
+              let text = '';
+              if (typeof msg === 'string') text = msg;
+              else if (Array.isArray(msg)) text = msg.map(p => (p && p.text) || '').join('\n');
+              text = String(text || '').trim();
+              if (!text) { core.warning(`vision for bug #${b.id}: пустой ответ`); return null; }
+              return text.slice(0, 3500);
+            }
+
+            function visionLines(desc) {
+              return [
+                '', VISION_HEAD, desc, '',
+                `_Описание сгенерировано автоматически (${VISION_MODEL}) — сверяйте со скриншотом._`
+              ];
+            }
+
+            async function safeDescribe(b) {
+              try { return await describeScreenshot(b); }
+              catch (e) { core.warning(`vision for bug #${b.id} failed: ${e.message}`); return null; }
+            }
+
             const have = new Map(); // bug id -> issue
             for await (const page of github.paginate.iterator(github.rest.issues.listForRepo, {
               owner, repo, state: 'all', per_page: 100
@@ -102,6 +188,8 @@ jobs:
                 catch (e) { core.warning(`screenshot for bug #${b.id} failed: ${e.message}`); }
                 if (url) lines.push(...screenshotLines(b, url));
                 else lines.push('', `📸 Есть скриншот — открыть: ${base}/admin.html#bug-${b.id}`);
+                const desc = await safeDescribe(b);
+                if (desc) lines.push(...visionLines(desc));
               }
               lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано GitHub Actions._`);
               const labels = ['bug'];
@@ -114,24 +202,30 @@ jobs:
             }
             core.info('created: ' + created);
 
-            // Дозаполнение: у уже созданных issues со скриншотом, но без картинки
-            // в теле, добавляем раздел «Скриншот».
+            // Дозаполнение уже созданных issues со скриншотом:
+            //  - нет картинки в теле → добавляем раздел «Скриншот»;
+            //  - нет авто-описания → добавляем раздел VISION_HEAD (до VISION_MAX_PER_RUN за запуск).
             let backfilled = 0;
             for (const b of bugs) {
               const it = have.get(Number(b.id));
               if (!it || !b.skrin) continue;
-              if ((it.body || '').includes(`screenshots/bug-${b.id}.`)) continue;
-              let url = null;
-              try { url = await saveScreenshot(b); }
-              catch (e) { core.warning(`backfill screenshot for bug #${b.id} failed: ${e.message}`); }
-              if (!url) continue;
-              await github.rest.issues.update({
-                owner, repo, issue_number: it.number,
-                body: (it.body || '') + '\n' + screenshotLines(b, url).join('\n')
-              });
+              let body = it.body || '';
+              let changed = false;
+              if (!body.includes(`screenshots/bug-${b.id}.`)) {
+                let url = null;
+                try { url = await saveScreenshot(b); }
+                catch (e) { core.warning(`backfill screenshot for bug #${b.id} failed: ${e.message}`); }
+                if (url) { body += '\n' + screenshotLines(b, url).join('\n'); changed = true; }
+              }
+              if (!body.includes(VISION_HEAD) && VISION_KEY && visionUsed < VISION_MAX_PER_RUN) {
+                const desc = await safeDescribe(b);
+                if (desc) { body += '\n' + visionLines(desc).join('\n'); changed = true; }
+              }
+              if (!changed) continue;
+              await github.rest.issues.update({ owner, repo, issue_number: it.number, body });
               backfilled++;
             }
-            core.info('backfilled screenshots: ' + backfilled);
+            core.info('backfilled: ' + backfilled + ', vision calls: ' + visionUsed);
 
             // Ответы Лаврика агенту: публикуем комментарием в issue (kak = 'issue:N').
             // Идемпотентно: метка <!-- lavrik-reply:ID --> защищает от дублей.
