@@ -21,7 +21,8 @@ jobs:
         env:
           BUGS_URL: https://lavrik-bugs.onrender.com
           # VISION_V1: авто-описание скриншотов текстом, чтобы агент «видел» картинку.
-          # Используется DeepSeek (тот же провайдер, что у наставника атласа и тьютора каталога в FORMYLA).
+          # Используется DeepSeek (тот же провайдер и та же vision-модель, что у распознавания фото
+          # в генераторе чертежей FORMYLA, geoexact/web.py).
           # Секрет DEEPSEEK_API_KEY добавьте в Settings → Secrets and variables → Actions.
           # Модель/адрес можно переопределить переменными VISION_MODEL / VISION_API_BASE. Без ключа шаг пропускается.
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -87,6 +88,7 @@ jobs:
             const VISION_MAX_PER_RUN = 8;
             const VISION_HEAD = '### Что на скриншоте (авто-описание ИИ)';
             let visionUsed = 0;
+            let visionThinkingUnsupported = false;
             if (!VISION_KEY) core.info('vision: DEEPSEEK_API_KEY не задан — описания скриншотов пропущены');
 
             function visionPrompt(b) {
@@ -106,6 +108,17 @@ jobs:
               ].filter(Boolean).join('\n');
             }
 
+            async function visionCall(payload) {
+              return fetch(VISION_BASE + '/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Authorization': 'Bearer ' + VISION_KEY,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+              });
+            }
+
             async function describeScreenshot(b) {
               if (!VISION_KEY || !b.skrin) return null;
               if (visionUsed >= VISION_MAX_PER_RUN) return null;
@@ -113,7 +126,7 @@ jobs:
               visionUsed++;
               const payload = {
                 model: VISION_MODEL,
-                max_tokens: 1000,
+                max_tokens: 2000,
                 temperature: 0.2,
                 messages: [{
                   role: 'user',
@@ -123,25 +136,38 @@ jobs:
                   ]
                 }]
               };
-              const rr = await fetch(VISION_BASE + '/chat/completions', {
-                method: 'POST',
-                headers: {
-                  'Authorization': 'Bearer ' + VISION_KEY,
-                  'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload)
-              });
+              // Как в geoexact/web.py (GEOEXACT_THINKING_FIX): без отключения «думания»
+              // vision-модель DeepSeek рассуждает десятки секунд и съедает лимит токенов,
+              // возвращая пустой content. При HTTP 400 с упоминанием thinking — повтор без параметра.
+              if (!visionThinkingUnsupported) payload.thinking = { type: 'disabled' };
+              let rr = await visionCall(payload);
+              if (rr.status === 400 && payload.thinking) {
+                const t = await rr.text();
+                if (/thinking/i.test(t)) {
+                  visionThinkingUnsupported = true;
+                  delete payload.thinking;
+                  rr = await visionCall(payload);
+                } else {
+                  core.warning(`vision for bug #${b.id}: 400 ${t.slice(0, 300)}`);
+                  return null;
+                }
+              }
               if (!rr.ok) {
                 core.warning(`vision for bug #${b.id}: ${rr.status} ${(await rr.text()).slice(0, 300)}`);
                 return null;
               }
-              const j = await rr.json();
-              const msg = (((j.choices || [])[0] || {}).message || {}).content;
+              const rawText = await rr.text();
+              let j;
+              try { j = JSON.parse(rawText); }
+              catch (e) { core.warning(`vision for bug #${b.id}: не JSON: ${rawText.slice(0, 300)}`); return null; }
+              const message = (((j.choices || [])[0] || {}).message || {});
+              let msg = message.content;
               let text = '';
               if (typeof msg === 'string') text = msg;
               else if (Array.isArray(msg)) text = msg.map(p => (p && p.text) || '').join('\n');
               text = String(text || '').trim();
-              if (!text) { core.warning(`vision for bug #${b.id}: пустой ответ`); return null; }
+              if (!text && typeof message.reasoning_content === 'string') text = message.reasoning_content.trim();
+              if (!text) { core.warning(`vision for bug #${b.id}: пустой ответ: ${rawText.slice(0, 300)}`); return null; }
               return text.slice(0, 3500);
             }
 
