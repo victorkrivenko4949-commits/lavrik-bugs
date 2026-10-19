@@ -136,13 +136,40 @@ function baseUrlOf(req){
 app.get('/api/config', (req,res) => res.json({
   ok: Boolean(SUPA_URL && SUPA_KEY),
   github: Boolean(GH_TOKEN),
-  repo: GH_REPO
+  repo: GH_REPO,
+  needKey: Boolean(ADMIN_KEY)
 }));
 
 app.get('/api/bugs', async (req,res) => {
   if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
   try { res.json(await supaSelectBugs()); }
   catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+});
+
+// STATUS_SYNC_V1: смена статуса бага (new / in_progress / done).
+// Используется кнопками админки (admin.html) и workflow close-fixed.yml,
+// который переводит в done баги, исправленные коммитами в FORMYLA.
+// Если задан ADMIN_KEY — нужен заголовок x-admin-key.
+const ALLOWED_STATUS = ['new', 'in_progress', 'done'];
+app.patch('/api/bugs/:id', async (req,res) => {
+  const id = Number(req.params.id);
+  const status = String((req.body || {}).status || '');
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad id' });
+  if (!ALLOWED_STATUS.includes(status)) return res.status(400).json({ error: 'bad status' });
+  if (ADMIN_KEY && req.get('x-admin-key') !== ADMIN_KEY) return res.status(401).json({ error: 'Неверный ключ админа' });
+  if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
+  try {
+    const r = await fetch(`${SUPA_URL}/rest/v1/bugs?id=eq.${id}`, {
+      method: 'PATCH',
+      headers: supaHeaders(SUPA_READ_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
+      body: JSON.stringify({ status })
+    });
+    if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
+    const rows = await r.json();
+    if (!Array.isArray(rows) || !rows.length) return res.status(404).json({ error: 'Баг не найден' });
+    _inboxCache = { at: 0, data: null };
+    res.json({ ok: true, id, status });
+  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
 });
 
 app.post('/api/bugs', async (req,res) => {

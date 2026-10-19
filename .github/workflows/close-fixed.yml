@@ -1,0 +1,128 @@
+name: Исправленные баги → закрыть Issues
+
+# CLOSE_FIXED_V1: автоматически отмечает и закрывает issues багов Лаврика, которые уже исправлены.
+# Источники правды (любого достаточно):
+#   1) коммит в FORMYLA с упоминанием бага: «fix(lavrik #14)», «lavrik #8 #9 #10», «(lavrik-bugs #21)», «bug #23»;
+#   2) статус done в Supabase (кнопка «✅ Исправлено» в админке lavrik-bugs).
+# Что делает с issue: вставляет надпись «✅ ИСПРАВЛЕНО» в начало тела, добавляет «✅» в заголовок,
+# ставит метку «исправлено», пишет комментарий со ссылкой на коммит и закрывает (completed).
+# Обратно в Supabase статус переводится в done через PATCH /api/bugs/:id (если сервер его поддерживает).
+# Идемпотентно: закрытые issues не трогает, маркер <!-- lavrik-fixed --> защищает от повторной вставки.
+
+on:
+  schedule:
+    - cron: '5,35 * * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/close-fixed.yml'
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: lavrik-close-fixed
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          BUGS_URL: https://lavrik-bugs.onrender.com
+          SOURCE_REPO: ${{ vars.SOURCE_REPO || 'victorkrivenko4949-commits/FORMYLA' }}
+          SINCE: ${{ vars.CLOSE_FIXED_SINCE || '2026-10-12T00:00:00Z' }}
+          ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+        with:
+          script: |
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const [srcOwner, srcRepo] = String(process.env.SOURCE_REPO).split('/');
+            const base = String(process.env.BUGS_URL || '').replace(/\/+$/, '');
+            const adminKey = process.env.ADMIN_KEY || '';
+            const since = process.env.SINCE;
+            const MARK = '<!-- lavrik-fixed -->';
+            const LABEL = 'исправлено';
+
+            // 1) Какие баги исправлены коммитами в FORMYLA (новые коммиты первыми).
+            const fixed = new Map(); // bug id -> { sha, url, msg }
+            let pages = 0;
+            for await (const page of github.paginate.iterator(github.rest.repos.listCommits, {
+              owner: srcOwner, repo: srcRepo, since, per_page: 100
+            })) {
+              for (const c of page.data) {
+                const msg = String((c.commit && c.commit.message) || '');
+                const ids = new Set();
+                for (const m of msg.matchAll(/lavrik(?:-bugs)?\s*:?\s*((?:#\d+[\s,]*)+)/gi)) {
+                  for (const n of m[1].matchAll(/#(\d+)/g)) ids.add(Number(n[1]));
+                }
+                for (const m of msg.matchAll(/(?:^|[\s(:,])(?:bug|баг)\s*#(\d+)/gi)) ids.add(Number(m[1]));
+                for (const id of ids) {
+                  if (!fixed.has(id)) fixed.set(id, { sha: c.sha.slice(0, 7), url: c.html_url, msg: msg.split('\n')[0].slice(0, 140) });
+                }
+              }
+              if (++pages >= 6) break;
+            }
+            core.info(`fixed by commits in ${srcOwner}/${srcRepo}: ${[...fixed.keys()].sort((a,b)=>a-b).join(', ') || '—'}`);
+
+            // 2) Какие баги отмечены done в админке (Supabase).
+            const dbDone = new Set();
+            try {
+              const r = await fetch(base + '/api/bugs', { headers: { 'Accept': 'application/json' } });
+              if (r.ok) {
+                for (const b of await r.json()) { if (b.status === 'done') dbDone.add(Number(b.id)); }
+              } else core.warning('bugs api: ' + r.status);
+            } catch (e) { core.warning('bugs api failed: ' + e.message); }
+            core.info('done in db: ' + ([...dbDone].sort((a,b)=>a-b).join(', ') || '—'));
+
+            // 3) Открытые issues → отметить и закрыть.
+            let closed = 0, synced = 0;
+            for await (const page of github.paginate.iterator(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100
+            })) {
+              for (const it of page.data) {
+                if (it.pull_request) continue;
+                const m = /lavrik-bug-id:(\d+)/.exec(it.body || '') || /^\[Баг #(\d+)\]/.exec(it.title || '');
+                if (!m) continue;
+                const id = Number(m[1]);
+                const fx = fixed.get(id), inDb = dbDone.has(id);
+                if (!fx && !inDb) continue;
+
+                const how = fx
+                  ? `коммит [\`${fx.sha}\`](${fx.url}) в ${srcOwner}/${srcRepo}: ${fx.msg}`
+                  : 'отмечено «✅ Исправлено» в админке lavrik-bugs';
+                const when = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
+
+                // Надпись в самом баге + «✅» в заголовке.
+                let body = it.body || '';
+                if (!body.includes(MARK)) {
+                  body = body.replace(/\*\*Статус в базе:\*\*[^\n]*/, '**Статус в базе:** done');
+                  body = `${MARK}\n> ## ✅ ИСПРАВЛЕНО\n> ${how}\n> _Отмечено автоматически ${when} (МСК)._\n\n` + body;
+                }
+                const title = /^✅/.test(it.title) ? it.title : '✅ ' + it.title;
+                await github.rest.issues.update({ owner, repo, issue_number: it.number, title, body });
+
+                try { await github.rest.issues.addLabels({ owner, repo, issue_number: it.number, labels: [LABEL] }); }
+                catch (e) { core.warning(`label for #${it.number}: ${e.message}`); }
+
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: it.number,
+                  body: `${MARK}\n✅ **Исправлено** — ${how}.\n\nЛаврик, проверь, пожалуйста. Если баг всё ещё повторяется — напиши здесь или отправь новый баг с формы.`
+                });
+                await github.rest.issues.update({ owner, repo, issue_number: it.number, state: 'closed', state_reason: 'completed' });
+                closed++;
+                core.info(`closed #${it.number} (bug #${id}) — ${how}`);
+
+                // Статус в Supabase → done, чтобы админка показывала бага во вкладке «Исправлено».
+                if (!inDb && base) {
+                  try {
+                    const headers = { 'Content-Type': 'application/json' };
+                    if (adminKey) headers['x-admin-key'] = adminKey;
+                    const r = await fetch(`${base}/api/bugs/${id}`, { method: 'PATCH', headers, body: JSON.stringify({ status: 'done' }) });
+                    if (r.ok) synced++; else core.warning(`db status for bug #${id}: ${r.status} ${(await r.text()).slice(0, 200)}`);
+                  } catch (e) { core.warning(`db status for bug #${id} failed: ${e.message}`); }
+                }
+              }
+            }
+            core.info(`closed: ${closed}, db synced: ${synced}`);
