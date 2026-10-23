@@ -198,16 +198,20 @@ jobs:
             let created = 0;
             for (const b of [...bugs].reverse()) {
               if (have.has(Number(b.id))) continue;
+              // BUG_TYPE_V1: тип проблемы хранится префиксом в chto: "[Дизайн] текст"
+              const tipM = /^\[([^\]]{1,40})\]\s/.exec(String(b.chto || ''));
+              const tip = tipM ? tipM[1] : '';
               const text = String(b.chto || '').replace(/\s+/g, ' ').trim();
               const title = `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${text.slice(0, 70)}${text.length > 70 ? '…' : ''}`;
               const lines = [
                 `<!-- lavrik-bug-id:${b.id} -->`,
                 `**Где сломалось:** ${b.razdel || '—'}`,
+                tip ? `**Тип проблемы:** ${tip}` : null,
                 `**Важность:** ${b.vazhnost || '—'}`,
                 `**Статус в базе:** ${b.status || 'new'}`,
                 `**Отправлено:** ${fmt(b.created_at)}`,
                 '', '### Что случилось', b.chto || '—'
-              ];
+              ].filter(l => l !== null);
               if (b.kak) lines.push('', '### Как повторить', b.kak);
               if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
               if (b.skrin) {
@@ -225,6 +229,7 @@ jobs:
               if (v.startsWith('🔴')) labels.push('критично');
               else if (v.startsWith('🟢')) labels.push('мелочь');
               if (b.razdel) labels.push(String(b.razdel).slice(0, 50));
+              if (tip) labels.push(tip);
               await github.rest.issues.create({ owner, repo, title, body: lines.join('\n'), labels });
               created++;
             }

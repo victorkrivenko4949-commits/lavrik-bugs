@@ -80,10 +80,18 @@ function issueTitle(b){
   return `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${t.slice(0,70)}${t.length>70?'…':''}`;
 }
 
+function issueTip(b){
+  // Тип проблемы хранится префиксом в chto: "[Дизайн] текст".
+  const m = /^\[([^\]]{1,40})\]\s/.exec(String(b.chto || ''));
+  return m ? m[1] : '';
+}
+
 function issueBody(b, baseUrl){
+  const tip = issueTip(b);
   const lines = [
     MARK(b.id),
     `**Где сломалось:** ${b.razdel || '—'}`,
+    tip ? `**Тип проблемы:** ${tip}` : null,
     `**Важность:** ${b.vazhnost || '—'}`,
     `**Статус в базе:** ${b.status || 'new'}`,
     `**Отправлено:** ${b.created_at ? new Date(b.created_at).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—'}`,
@@ -95,7 +103,7 @@ function issueBody(b, baseUrl){
   if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
   if (b.skrin) lines.push('', `📸 Есть скриншот — открыть: ${baseUrl}/admin.html#bug-${b.id}`);
   lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано автоматически сервером lavrik-bugs._`);
-  return lines.join('\n');
+  return lines.filter(l => l !== null).join('\n');
 }
 
 function labelsFor(b){
@@ -104,6 +112,8 @@ function labelsFor(b){
   if (v.startsWith('🔴')) labels.push('критично');
   else if (v.startsWith('🟢')) labels.push('мелочь');
   if (b.razdel) labels.push(String(b.razdel).slice(0,50));
+  const tip = issueTip(b);
+  if (tip) labels.push(tip);
   return labels;
 }
 
@@ -185,15 +195,20 @@ app.post('/api/bugs', async (req,res) => {
   if (badPassword((req.body || {}).parol)) {
     return res.status(403).json({ error: 'Неверный пароль. Лаврик, спроси пароль у Виктора.' });
   }
-  const { razdel, chto, kak, ssylka, vazhnost, skrin } = req.body || {};
+  const { razdel, tip, chto, kak, ssylka, vazhnost, skrin } = req.body || {};
   if (!chto || !String(chto).trim()) return res.status(400).json({ error: 'Пустое поле «Что случилось?»' });
 
   const ALLOWED_VAZHNOST = ['🔴 Вообще не работает','🟡 Работает, но криво','🟢 Мелочь'];
+  // BUG_TYPE_V1: тип проблемы от Лаврика. В Supabase нет отдельной колонки,
+  // поэтому тип сохраняется префиксом в chto: "[Дизайн] текст".
+  const ALLOWED_TIP = ['Ошибка','Дизайн','Съелся текст','Неправильная задача','Что-то пропало','Тормозит','Другое'];
+  const tipVal = ALLOWED_TIP.includes(tip) ? tip : '';
+  const chtoFull = (tipVal ? `[${tipVal}] ` : '') + String(chto).trimLeft();
 
   try {
     const payload = {
       razdel: sanitizeText(razdel, 200),
-      chto: sanitizeText(chto, 5000),
+      chto: sanitizeText(chtoFull, 5000),
       kak: sanitizeText(kak, 3000),
       ssylka: sanitizeUrl(ssylka),
       vazhnost: ALLOWED_VAZHNOST.includes(vazhnost) ? vazhnost : '🟡 Работает, но криво',

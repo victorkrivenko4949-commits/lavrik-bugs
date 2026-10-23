@@ -46,6 +46,20 @@ body:
         - "Другое"
     validations:
       required: true
+  - type: dropdown
+    id: tip
+    attributes:
+      label: "Что за проблема?"
+      options:
+        - "Ошибка"
+        - "Дизайн"
+        - "Съелся текст"
+        - "Неправильная задача"
+        - "Что-то пропало"
+        - "Тормозит"
+        - "Другое"
+    validations:
+      required: true
   - type: textarea
     id: chto
     attributes:

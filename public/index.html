@@ -99,6 +99,17 @@
     </optgroup>
   </select>
 
+  <label>Что за проблема?</label>
+  <select id="tip">
+    <option>Ошибка</option>
+    <option>Дизайн</option>
+    <option>Съелся текст</option>
+    <option>Неправильная задача</option>
+    <option>Что-то пропало</option>
+    <option>Тормозит</option>
+    <option>Другое</option>
+  </select>
+
   <label>Что случилось?</label>
   <textarea id="chto" placeholder="Нажал на ... и выскочила ошибка ..."></textarea>
   <button class="btn mic" id="mic">🎤 Рассказать голосом</button>
@@ -181,6 +192,7 @@ skrin.onchange = () => {
 function reset(){
   document.getElementById('parol').value = '';
   document.getElementById('gde').selectedIndex = 0;
+  document.getElementById('tip').selectedIndex = 0;
   chto.value = '';
   document.getElementById('kak').value = '';
   document.getElementById('ssylka').value = '';
@@ -219,6 +231,7 @@ document.getElementById('send').onclick = async () => {
       body: JSON.stringify({
         parol: parol,
         razdel: document.getElementById('gde').value,
+        tip: document.getElementById('tip').value,
         chto: text,
         kak: document.getElementById('kak').value.trim(),
         ssylka: document.getElementById('ssylka').value.trim(),
