@@ -54,6 +54,7 @@
 <div class="card">
   <h1>🐞 Что сломалось, Лаврик?</h1>
   <p class="hint">Нажми микрофон и расскажи. Или напиши. Можно приложить скриншот. Потом — «Отправить».</p>
+  <div class="today" id="todayStat" style="display:none;background:#eef3ff;border-radius:12px;padding:10px 14px;margin:0 0 6px;font-size:15px;font-weight:600;color:#1a4fd6"></div>
 
   <label>Пароль 🔑</label>
   <input type="password" id="parol" placeholder="Пароль (спроси у Виктора)" autocomplete="off" style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
@@ -168,6 +169,21 @@ function loadParol(){
   });
 });
 loadParol();
+
+/* TODAY_COUNT_V1: «сколько добавлено сегодня» — по московскому времени. */
+async function loadTodayCount(){
+  try {
+    const r = await fetch('/api/bugs');
+    const a = await r.json();
+    const fmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' });
+    const today = fmt.format(new Date());
+    const n = a.filter(b => b.created_at && fmt.format(new Date(b.created_at)) === today).length;
+    const el = document.getElementById('todayStat');
+    el.textContent = '📊 Сегодня добавлено багов: ' + n;
+    el.style.display = 'block';
+  } catch(e) { /* база недоступна — тихо */ }
+}
+loadTodayCount();
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false, base = '';
 
