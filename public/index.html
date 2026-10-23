@@ -141,6 +141,8 @@
 
 <div class="inbox" id="inbox">
   <h2>💬 Вопросы от агента</h2>
+  <label style="margin-top:0">Пароль 🔑</label>
+  <input type="password" id="parolInbox" placeholder="Пароль (тот же, что в форме)" autocomplete="off" style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
   <div id="inboxList"></div>
 </div>
 
@@ -315,11 +317,13 @@ async function sendReply(issue){
   const ta = document.getElementById('ans-' + issue);
   const btn = document.getElementById('btn-' + issue);
   const res = document.getElementById('res-' + issue);
+  const parol = (document.getElementById('parolInbox').value || '').trim();
+  if (!parol) { document.getElementById('parolInbox').focus(); res.innerHTML = '<div class="err">Сначала введи пароль сверху.</div>'; return; }
   const text = (ta.value || '').trim();
   if (!text) { ta.focus(); res.innerHTML = '<div class="err">Сначала напиши ответ.</div>'; return; }
   btn.disabled = true; const prev = btn.textContent; btn.innerHTML = '<span class="spinner"></span>Отправляем…';
   try {
-    const r = await fetch('/api/inbox/' + issue + '/reply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text }) });
+    const r = await fetch('/api/inbox/' + issue + '/reply', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, parol }) });
     const j = await r.json();
     if (!r.ok || !j.ok) throw new Error(j.error || 'Сервер ответил ошибкой ' + r.status);
     res.innerHTML = '<div class="done">✅ Ответ принят' + (j.via==='direct' ? ' и уже у агента.' : '. Агент получит его в течение 10 минут.') + ' Спасибо!</div>';

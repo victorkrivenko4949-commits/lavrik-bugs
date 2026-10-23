@@ -367,6 +367,11 @@ function replyRateOk(ip){
 }
 
 app.post('/api/inbox/:issue/reply', async (req,res) => {
+  // BUGS_PASSWORD_V1: ответы Лаврика тоже за паролем — иначе кто угодно
+  // напишет «Ответ Лаврика», и агент примет его за Лаврика.
+  if (badPassword((req.body || {}).parol)) {
+    return res.status(403).json({ error: 'Неверный пароль. Лаврик, спроси пароль у Виктора.' });
+  }
   if (!GH_TOKEN) return res.status(500).json({ error: 'GITHUB_TOKEN not set' });
   const n = Number(req.params.issue);
   const text = sanitizeText((req.body||{}).text, 3000).trim();
