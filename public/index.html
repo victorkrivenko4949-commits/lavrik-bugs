@@ -150,6 +150,24 @@
 const chto = document.getElementById('chto');
 const mic = document.getElementById('mic');
 const note = document.getElementById('micnote');
+
+/* PAROL_PERSIST_V1: пароль запоминается в браузере Лаврика (localStorage),
+   поля формы и ответов синхронизируются — вводить один раз. */
+const PAROL_KEY = 'lb_parol';
+function loadParol(){
+  const v = localStorage.getItem(PAROL_KEY) || '';
+  document.getElementById('parol').value = v;
+  document.getElementById('parolInbox').value = v;
+}
+['parol','parolInbox'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => {
+    localStorage.setItem(PAROL_KEY, el.value.trim());
+    const other = document.getElementById(id === 'parol' ? 'parolInbox' : 'parol');
+    if (other.value !== el.value) other.value = el.value;
+  });
+});
+loadParol();
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false, base = '';
 
