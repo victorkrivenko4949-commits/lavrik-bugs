@@ -195,12 +195,14 @@ jobs:
             core.info('already in issues: ' + have.size);
 
             const fmt = d => d ? new Date(d).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) : '—';
+            const BUG_TYPES = ['Ошибка','Дизайн','Съелся текст','Неправильная задача','Что-то пропало','Тормозит','Другое'];
             let created = 0;
             for (const b of [...bugs].reverse()) {
               if (have.has(Number(b.id))) continue;
               // BUG_TYPE_V1: тип проблемы хранится префиксом в chto: "[Дизайн] текст"
+              // Распознаём только допустимые типы, чтобы обычный текст «[...] ...» не стал меткой.
               const tipM = /^\[([^\]]{1,40})\]\s/.exec(String(b.chto || ''));
-              const tip = tipM ? tipM[1] : '';
+              const tip = (tipM && BUG_TYPES.includes(tipM[1])) ? tipM[1] : '';
               const text = String(b.chto || '').replace(/\s+/g, ' ').trim();
               const title = `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${text.slice(0, 70)}${text.length > 70 ? '…' : ''}`;
               const lines = [

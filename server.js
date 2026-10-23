@@ -80,10 +80,12 @@ function issueTitle(b){
   return `[Баг #${b.id}] ${b.razdel || 'Другое'}: ${t.slice(0,70)}${t.length>70?'…':''}`;
 }
 
+const BUG_TYPES = ['Ошибка','Дизайн','Съелся текст','Неправильная задача','Что-то пропало','Тормозит','Другое'];
 function issueTip(b){
   // Тип проблемы хранится префиксом в chto: "[Дизайн] текст".
+  // Распознаём только допустимые типы, чтобы обычный текст «[...] ...» не стал меткой.
   const m = /^\[([^\]]{1,40})\]\s/.exec(String(b.chto || ''));
-  return m ? m[1] : '';
+  return (m && BUG_TYPES.includes(m[1])) ? m[1] : '';
 }
 
 function issueBody(b, baseUrl){
