@@ -55,6 +55,9 @@
   <h1>🐞 Что сломалось, Лаврик?</h1>
   <p class="hint">Нажми микрофон и расскажи. Или напиши. Можно приложить скриншот. Потом — «Отправить».</p>
 
+  <label>Пароль 🔑</label>
+  <input type="password" id="parol" placeholder="Пароль (спроси у Виктора)" autocomplete="off" style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
+
   <label>Где сломалось?</label>
   <select id="gde">
     <optgroup label="Учёба">
@@ -176,6 +179,7 @@ skrin.onchange = () => {
 };
 
 function reset(){
+  document.getElementById('parol').value = '';
   document.getElementById('gde').selectedIndex = 0;
   chto.value = '';
   document.getElementById('kak').value = '';
@@ -191,6 +195,8 @@ document.getElementById('send').onclick = async () => {
   const errtext = document.getElementById('errtext');
   okmsg.style.display='none'; errmsg.style.display='none';
 
+  const parol = document.getElementById('parol').value.trim();
+  if (!parol) { document.getElementById('parol').focus(); errtext.textContent='Сначала введи пароль сверху.'; errmsg.style.display='block'; return; }
   const text = chto.value.trim();
   if (!text) { chto.focus(); note.textContent = 'Сначала расскажи или напиши, что случилось.'; return; }
   if (listening) stop();
@@ -211,6 +217,7 @@ document.getElementById('send').onclick = async () => {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({
+        parol: parol,
         razdel: document.getElementById('gde').value,
         chto: text,
         kak: document.getElementById('kak').value.trim(),
@@ -225,7 +232,7 @@ document.getElementById('send').onclick = async () => {
     okmsg.style.display='block';
     reset();
   } catch(e) {
-    errtext.textContent = 'Не отправилось: ' + (e.message||e) + '. Проверь интернет и попробуй ещё.';
+    errtext.textContent = (String(e.message||e).includes('Неверный пароль') ? 'Неверный пароль. Спроси пароль у Виктора.' : 'Не отправилось: ' + (e.message||e) + '. Проверь интернет и попробуй ещё.');
     errmsg.style.display='block';
   } finally {
     btn.disabled = false;

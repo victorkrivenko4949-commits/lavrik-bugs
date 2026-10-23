@@ -19,3 +19,5 @@ services:
         value: victorkrivenko4949-commits/lavrik-bugs
       - key: ADMIN_KEY
         sync: false
+      - key: BUGS_PASSWORD
+        sync: false

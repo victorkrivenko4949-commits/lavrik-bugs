@@ -21,6 +21,13 @@ const GH_TOKEN = process.env.GITHUB_TOKEN || '';
 const GH_REPO = process.env.GITHUB_REPO || 'victorkrivenko4949-commits/lavrik-bugs';
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
+// BUGS_PASSWORD_V1: пароль формы. Без него баги не принимаются (fail closed).
+// Задаётся в Environment на Render. В /api/config виден только факт, что пароль включён.
+const BUGS_PASSWORD = process.env.BUGS_PASSWORD || '';
+function badPassword(v){
+  return !BUGS_PASSWORD || String(v || '').trim() !== BUGS_PASSWORD;
+}
+
 // Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 
@@ -137,7 +144,8 @@ app.get('/api/config', (req,res) => res.json({
   ok: Boolean(SUPA_URL && SUPA_KEY),
   github: Boolean(GH_TOKEN),
   repo: GH_REPO,
-  needKey: Boolean(ADMIN_KEY)
+  needKey: Boolean(ADMIN_KEY),
+  password: Boolean(BUGS_PASSWORD)
 }));
 
 app.get('/api/bugs', async (req,res) => {
@@ -173,6 +181,10 @@ app.patch('/api/bugs/:id', async (req,res) => {
 });
 
 app.post('/api/bugs', async (req,res) => {
+  // BUGS_PASSWORD_V1: сначала проверка пароля — до любых обращений к Supabase/GitHub.
+  if (badPassword((req.body || {}).parol)) {
+    return res.status(403).json({ error: 'Неверный пароль. Лаврик, спроси пароль у Виктора.' });
+  }
   const { razdel, chto, kak, ssylka, vazhnost, skrin } = req.body || {};
   if (!chto || !String(chto).trim()) return res.status(400).json({ error: 'Пустое поле «Что случилось?»' });
 
