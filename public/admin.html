@@ -117,13 +117,21 @@ function renderBug(b){
     d.appendChild(m);
   }
 
-  if (b.skrin && isImgDataUrl(b.skrin)) {
-    const img = document.createElement('img');
-    img.src = b.skrin;
-    img.alt = 'скриншот';
-    img.loading = 'lazy';
-    img.referrerPolicy = 'no-referrer';
-    d.appendChild(img);
+  if (b.skrin) {
+    // MULTI_SKRIN_V1: skrin — либо одиночный data:URL, либо JSON-массив из них.
+    const skrins = [];
+    if (isImgDataUrl(b.skrin)) skrins.push(b.skrin);
+    else if (b.skrin.startsWith('[')) {
+      try { JSON.parse(b.skrin).forEach(s => { if (isImgDataUrl(s)) skrins.push(s); }); } catch (e) {}
+    }
+    for (const s of skrins) {
+      const img = document.createElement('img');
+      img.src = s;
+      img.alt = 'скриншот';
+      img.loading = 'lazy';
+      img.referrerPolicy = 'no-referrer';
+      d.appendChild(img);
+    }
   }
 
   const meta = document.createElement('div');

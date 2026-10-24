@@ -218,7 +218,15 @@ const srlabel = document.getElementById('srlabel');
 let skrinFiles = [];
 function plural(n){ return n === 1 ? 'скриншот' : (n < 5 ? 'скриншота' : 'скриншотов'); }
 skrin.onchange = () => {
-  skrinFiles = Array.from(skrin.files || []).slice(0, 4);
+  const picked = Array.from(skrin.files || []);
+  if (picked.length > 4) {
+    errtext.textContent = 'Не больше 4 скриншотов за раз — выбери меньше.';
+    errmsg.style.display = 'block';
+    skrin.value = '';
+    skrin.onchange();
+    return;
+  }
+  skrinFiles = picked;
   skrinPreview.innerHTML = '';
   if (skrinFiles.length) {
     srlabel.textContent = '📎 ' + skrinFiles.length + ' ' + plural(skrinFiles.length) + ' (нажми, чтобы заменить)';
@@ -279,8 +287,8 @@ document.getElementById('send').onclick = async () => {
 
   let skrinB64 = [];
   if (skrinFiles.length) {
-    const tooBig = skrinFiles.find(f => f.size > 5*1024*1024);
-    if (tooBig) { errtext.textContent='Скриншот «' + tooBig.name + '» больше 5 МБ — уменьши и попробуй ещё.'; errmsg.style.display='block'; return; }
+    const tooBig = skrinFiles.find(f => f.size > 4*1024*1024);
+    if (tooBig) { errtext.textContent='Скриншот «' + tooBig.name + '» больше 4 МБ — уменьши и попробуй ещё.'; errmsg.style.display='block'; return; }
     skrinB64 = await Promise.all(skrinFiles.map(f => new Promise(res => { const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(f); })));
   }
 

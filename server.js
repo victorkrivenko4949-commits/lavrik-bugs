@@ -30,8 +30,9 @@ function badPassword(v){
 
 // Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
-const SKRIN_MAX_BYTES = 14_000_000; // ~10 MB base64 на картинку
+const SKRIN_MAX_BYTES = 5_500_000; // ~4 МБ файла в base64 на картинку
 const SKRIN_MAX_COUNT = 4;
+const SKRIN_MAX_TOTAL = 22_000_000; // суммарный лимит 4 картинок
 
 function sanitizeSkrin(v){
   if (!v || typeof v !== 'string') return null;
@@ -43,9 +44,22 @@ function sanitizeSkrin(v){
 // MULTI_SKRIN_V1 (lavrik-bugs #31): несколько скриншотов на один баг.
 // Принимаем строку (старый формат) или массив. В Supabase колонка skrin текстовая:
 // один скриншот — data:... как раньше, несколько — JSON-массив data:... строк.
+// Ошибки — явные (throw), без молчаливого отбрасывания файлов.
 function sanitizeSkrins(v){
-  const arr = Array.isArray(v) ? v.slice(0, SKRIN_MAX_COUNT) : [v];
-  const clean = arr.map(sanitizeSkrin).filter(Boolean);
+  const arr = Array.isArray(v) ? v : [v];
+  if (arr.filter(Boolean).length > SKRIN_MAX_COUNT) {
+    throw new Error('Не больше ' + SKRIN_MAX_COUNT + ' скриншотов за раз — убери лишние');
+  }
+  const clean = [];
+  arr.forEach((s, i) => {
+    if (!s) return;
+    if (!IMG_RE.test(s)) throw new Error('Скриншот №' + (i + 1) + ' повреждён или не картинка');
+    if (s.length > SKRIN_MAX_BYTES) throw new Error('Скриншот №' + (i + 1) + ' больше 4 МБ — уменьши');
+    clean.push(s);
+  });
+  if (clean.reduce((a, s) => a + s.length, 0) > SKRIN_MAX_TOTAL) {
+    throw new Error('Скриншоты вместе слишком тяжёлые (больше ~16 МБ) — отправь меньшим числом');
+  }
   if (!clean.length) return null;
   if (clean.length === 1) return clean[0];
   return JSON.stringify(clean);
@@ -227,9 +241,11 @@ app.post('/api/bugs', async (req,res) => {
       kak: sanitizeText(kak, 3000),
       ssylka: sanitizeUrl(ssylka),
       vazhnost: ALLOWED_VAZHNOST.includes(vazhnost) ? vazhnost : '🟡 Работает, но криво',
-      skrin: sanitizeSkrins(skrin),
       status: 'new'
     };
+    // MULTI_SKRIN_V1: скриншоты — с явными ошибками валидации
+    try { payload.skrin = sanitizeSkrins(skrin); }
+    catch (e) { return res.status(400).json({ error: String(e.message || e) }); }
 
     const r = await fetch(SUPA_URL + '/rest/v1/bugs', {
       method: 'POST',
