@@ -122,10 +122,10 @@
   <label>Ссылка на страницу (если есть)</label>
   <input type="url" id="ssylka" placeholder="https://formyla.net/..." style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
 
-  <label>Скриншот (если есть)</label>
-  <input type="file" id="skrin" accept="image/*" class="srinput">
-  <label class="srlabel" for="skrin" id="srlabel">📎 Прикрепить скриншот</label>
-  <img id="skrinPreview" class="preview" style="display:none">
+  <label>Скриншоты (до 4)</label>
+  <input type="file" id="skrin" accept="image/*" multiple class="srinput">
+  <label class="srlabel" for="skrin" id="srlabel">📎 Прикрепить скриншоты</label>
+  <div id="skrinPreview" style="margin-top:8px"></div>
 
   <label>Насколько мешает?</label>
   <select id="vazhnost">
@@ -213,17 +213,45 @@ mic.onclick = () => listening ? stop() : start();
 const skrin = document.getElementById('skrin');
 const skrinPreview = document.getElementById('skrinPreview');
 const srlabel = document.getElementById('srlabel');
+
+// MULTI_SKRIN_V1 (lavrik-bugs #31): до 4 скриншотов, превью каждого.
+let skrinFiles = [];
+function plural(n){ return n === 1 ? 'скриншот' : (n < 5 ? 'скриншота' : 'скриншотов'); }
 skrin.onchange = () => {
-  if (skrin.files && skrin.files[0]) {
-    srlabel.textContent = '📎 ' + skrin.files[0].name + ' (нажми, чтобы заменить)';
-    const r = new FileReader();
-    r.onload = e => { skrinPreview.src = e.target.result; skrinPreview.style.display = 'block'; };
-    r.readAsDataURL(skrin.files[0]);
+  skrinFiles = Array.from(skrin.files || []).slice(0, 4);
+  skrinPreview.innerHTML = '';
+  if (skrinFiles.length) {
+    srlabel.textContent = '📎 ' + skrinFiles.length + ' ' + plural(skrinFiles.length) + ' (нажми, чтобы заменить)';
+    skrinFiles.forEach((f, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;margin-top:4px';
+      const r = new FileReader();
+      r.onload = e => {
+        const img = document.createElement('img');
+        img.src = e.target.result;
+        img.className = 'preview';
+        img.style.display = 'block';
+        row.appendChild(img);
+      };
+      r.readAsDataURL(f);
+      const del = document.createElement('a');
+      del.textContent = '✕ убрать';
+      del.href = '#';
+      del.style.cssText = 'color:#c0392b;text-decoration:none;font-size:13px;white-space:nowrap;margin-top:4px';
+      del.onclick = ev => { ev.preventDefault(); skrinFiles.splice(i,1); syncSkrinInput(); };
+      row.appendChild(del);
+      skrinPreview.appendChild(row);
+    });
   } else {
-    srlabel.textContent = '📎 Прикрепить скриншот';
-    skrinPreview.style.display = 'none';
+    srlabel.textContent = '📎 Прикрепить скриншоты';
   }
 };
+function syncSkrinInput(){
+  const dt = new DataTransfer();
+  skrinFiles.forEach(f => dt.items.add(f));
+  skrin.files = dt.files;
+  skrin.onchange();
+}
 
 function reset(){
   document.getElementById('parol').value = '';
@@ -233,7 +261,7 @@ function reset(){
   document.getElementById('kak').value = '';
   document.getElementById('ssylka').value = '';
   document.getElementById('vazhnost').selectedIndex = 1;
-  skrin.value = ''; skrinPreview.style.display='none'; srlabel.textContent='📎 Прикрепить скриншот';
+  skrin.value = ''; skrinFiles = []; skrinPreview.innerHTML=''; srlabel.textContent='📎 Прикрепить скриншоты';
 }
 
 document.getElementById('send').onclick = async () => {
@@ -249,11 +277,11 @@ document.getElementById('send').onclick = async () => {
   if (!text) { chto.focus(); note.textContent = 'Сначала расскажи или напиши, что случилось.'; return; }
   if (listening) stop();
 
-  let skrinB64 = null;
-  if (skrin.files && skrin.files[0]) {
-    const f = skrin.files[0];
-    if (f.size > 5*1024*1024) { errtext.textContent='Скриншот больше 5 МБ — уменьши и попробуй ещё.'; errmsg.style.display='block'; return; }
-    skrinB64 = await new Promise(res => { const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(f); });
+  let skrinB64 = [];
+  if (skrinFiles.length) {
+    const tooBig = skrinFiles.find(f => f.size > 5*1024*1024);
+    if (tooBig) { errtext.textContent='Скриншот «' + tooBig.name + '» больше 5 МБ — уменьши и попробуй ещё.'; errmsg.style.display='block'; return; }
+    skrinB64 = await Promise.all(skrinFiles.map(f => new Promise(res => { const r=new FileReader(); r.onload=e=>res(e.target.result); r.readAsDataURL(f); })));
   }
 
   btn.disabled = true;

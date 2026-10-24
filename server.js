@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 
 const app = express();
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '25mb' })); // MULTI_SKRIN_V1: до 4 скриншотов
 app.use((req, res, next) => {
   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.set('Pragma', 'no-cache');
@@ -30,12 +30,25 @@ function badPassword(v){
 
 // Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
+const SKRIN_MAX_BYTES = 14_000_000; // ~10 MB base64 на картинку
+const SKRIN_MAX_COUNT = 4;
 
 function sanitizeSkrin(v){
   if (!v || typeof v !== 'string') return null;
   if (!IMG_RE.test(v)) return null;
-  if (v.length > 14_000_000) return null; // ~10 MB base64
+  if (v.length > SKRIN_MAX_BYTES) return null; // ~10 MB base64
   return v;
+}
+
+// MULTI_SKRIN_V1 (lavrik-bugs #31): несколько скриншотов на один баг.
+// Принимаем строку (старый формат) или массив. В Supabase колонка skrin текстовая:
+// один скриншот — data:... как раньше, несколько — JSON-массив data:... строк.
+function sanitizeSkrins(v){
+  const arr = Array.isArray(v) ? v.slice(0, SKRIN_MAX_COUNT) : [v];
+  const clean = arr.map(sanitizeSkrin).filter(Boolean);
+  if (!clean.length) return null;
+  if (clean.length === 1) return clean[0];
+  return JSON.stringify(clean);
 }
 
 function sanitizeUrl(v){
@@ -214,7 +227,7 @@ app.post('/api/bugs', async (req,res) => {
       kak: sanitizeText(kak, 3000),
       ssylka: sanitizeUrl(ssylka),
       vazhnost: ALLOWED_VAZHNOST.includes(vazhnost) ? vazhnost : '🟡 Работает, но криво',
-      skrin: sanitizeSkrin(skrin),
+      skrin: sanitizeSkrins(skrin),
       status: 'new'
     };
 

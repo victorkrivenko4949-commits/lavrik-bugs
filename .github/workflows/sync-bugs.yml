@@ -45,15 +45,30 @@ jobs:
             const branch = repoInfo.default_branch;
             const rawBase = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/screenshots`;
 
-            // Скриншот в Supabase хранится как data:image/...;base64. Сохраняем его
-            // файлом screenshots/bug-N.ext в репозитории и возвращаем прямую ссылку,
-            // чтобы картинка была видна прямо в issue и не зависела от Render.
-            async function saveScreenshot(b) {
-              const m = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(b.skrin || '');
+            // MULTI_SKRIN_V1 (lavrik-bugs #31): скриншотов может быть несколько.
+            // В Supabase колонка skrin: одна картинка — data:... как раньше,
+            // несколько — JSON-массив строк data:...
+            function parseSkrins(b) {
+              const raw = String(b.skrin || '');
+              if (!raw) return [];
+              if (raw.startsWith('[')) {
+                try {
+                  const arr = JSON.parse(raw);
+                  if (Array.isArray(arr)) return arr.filter(x => /^data:image\/(png|jpeg|jpg|webp|gif);base64,/.test(x));
+                } catch (e) { /* не JSON — считаем одиночным */ }
+              }
+              return /^data:image\/(png|jpeg|jpg|webp|gif);base64,/.test(raw) ? [raw] : [];
+            }
+
+            // Сохраняем скриншоты файлами screenshots/bug-N.ext (один) или
+            // screenshots/bug-N-i.ext (несколько) и возвращаем прямые ссылки.
+            async function saveScreenshot(b, skrin, idx) {
+              const m = /^data:image\/(png|jpeg|jpg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(skrin || '');
               if (!m) return null;
               const ext = m[1] === 'jpeg' ? 'jpg' : m[1];
-              const path = `screenshots/bug-${b.id}.${ext}`;
-              const url = `${rawBase}/bug-${b.id}.${ext}`;
+              const suffix = idx > 0 ? `-${idx + 1}` : '';
+              const path = `screenshots/bug-${b.id}${suffix}.${ext}`;
+              const url = `${rawBase}/bug-${b.id}${suffix}.${ext}`;
               try {
                 await github.rest.repos.getContent({ owner, repo, path, ref: branch });
                 return url; // уже сохранён
@@ -69,11 +84,23 @@ jobs:
               return url;
             }
 
-            function screenshotLines(b, url) {
+            async function saveAllScreenshots(b) {
+              const skrins = parseSkrins(b);
+              const urls = [];
+              for (let i = 0; i < skrins.length; i++) {
+                try { urls.push(await saveScreenshot(b, skrins[i], skrins.length > 1 ? i : -1)); }
+                catch (e) { core.warning(`screenshot ${i + 1} for bug #${b.id} failed: ${e.message}`); }
+              }
+              return urls.filter(Boolean);
+            }
+
+            function screenshotLines(b, urls) {
+              if (!urls.length) return [];
+              const head = urls.length > 1 ? '### Скриншоты (' + urls.length + ')' : '### Скриншот';
               return [
-                '', '### Скриншот',
-                `![Скриншот бага #${b.id}](${url})`,
-                `Также доступен в админке: ${base}/admin.html#bug-${b.id}`
+                '', head,
+                ...urls.map(u => `![Скриншот бага #${b.id}](${u})`),
+                `Также доступны в админке: ${base}/admin.html#bug-${b.id}`
               ];
             }
 
@@ -119,10 +146,10 @@ jobs:
               });
             }
 
-            async function describeScreenshot(b) {
-              if (!VISION_KEY || !b.skrin) return null;
+            async function describeScreenshot(b, skrin) {
+              if (!VISION_KEY || !skrin) return null;
               if (visionUsed >= VISION_MAX_PER_RUN) return null;
-              if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(b.skrin)) return null;
+              if (!/^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(skrin)) return null;
               visionUsed++;
               const payload = {
                 model: VISION_MODEL,
@@ -132,7 +159,7 @@ jobs:
                   role: 'user',
                   content: [
                     { type: 'text', text: visionPrompt(b) },
-                    { type: 'image_url', image_url: { url: b.skrin } }
+                    { type: 'image_url', image_url: { url: skrin } }
                   ]
                 }]
               };
@@ -171,16 +198,27 @@ jobs:
               return text.slice(0, 3500);
             }
 
-            function visionLines(desc) {
+            function visionLines(desc, idx, total) {
+              const head = total > 1 ? `${VISION_HEAD} №${idx + 1}` : VISION_HEAD;
               return [
-                '', VISION_HEAD, desc, '',
+                '', head, desc, '',
                 `_Описание сгенерировано автоматически (${VISION_MODEL}) — сверяйте со скриншотом._`
               ];
             }
 
-            async function safeDescribe(b) {
-              try { return await describeScreenshot(b); }
+            async function safeDescribe(b, skrin) {
+              try { return await describeScreenshot(b, skrin); }
               catch (e) { core.warning(`vision for bug #${b.id} failed: ${e.message}`); return null; }
+            }
+
+            async function describeAll(b) {
+              const skrins = parseSkrins(b);
+              const out = [];
+              for (let i = 0; i < skrins.length; i++) {
+                const desc = await safeDescribe(b, skrins[i]);
+                if (desc) out.push(visionLines(desc, i, skrins.length).join('\n'));
+              }
+              return out;
             }
 
             const have = new Map(); // bug id -> issue
@@ -217,13 +255,11 @@ jobs:
               if (b.kak) lines.push('', '### Как повторить', b.kak);
               if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
               if (b.skrin) {
-                let url = null;
-                try { url = await saveScreenshot(b); }
-                catch (e) { core.warning(`screenshot for bug #${b.id} failed: ${e.message}`); }
-                if (url) lines.push(...screenshotLines(b, url));
+                const urls = await saveAllScreenshots(b);
+                if (urls.length) lines.push(...screenshotLines(b, urls));
                 else lines.push('', `📸 Есть скриншот — открыть: ${base}/admin.html#bug-${b.id}`);
-                const desc = await safeDescribe(b);
-                if (desc) lines.push(...visionLines(desc));
+                const descs = await describeAll(b);
+                for (const d of descs) lines.push('', d);
               }
               lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано GitHub Actions._`);
               const labels = ['bug'];
@@ -246,15 +282,13 @@ jobs:
               if (!it || !b.skrin) continue;
               let body = it.body || '';
               let changed = false;
-              if (!body.includes(`screenshots/bug-${b.id}.`)) {
-                let url = null;
-                try { url = await saveScreenshot(b); }
-                catch (e) { core.warning(`backfill screenshot for bug #${b.id} failed: ${e.message}`); }
-                if (url) { body += '\n' + screenshotLines(b, url).join('\n'); changed = true; }
+              if (!body.includes(`screenshots/bug-${b.id}.`) && !body.includes(`screenshots/bug-${b.id}-1.`)) {
+                const urls = await saveAllScreenshots(b);
+                if (urls.length) { body += '\n' + screenshotLines(b, urls).join('\n'); changed = true; }
               }
               if (!body.includes(VISION_HEAD) && VISION_KEY && visionUsed < VISION_MAX_PER_RUN) {
-                const desc = await safeDescribe(b);
-                if (desc) { body += '\n' + visionLines(desc).join('\n'); changed = true; }
+                const descs = await describeAll(b);
+                if (descs.length) { body += '\n' + descs.join('\n\n'); changed = true; }
               }
               if (!changed) continue;
               await github.rest.issues.update({ owner, repo, issue_number: it.number, body });
