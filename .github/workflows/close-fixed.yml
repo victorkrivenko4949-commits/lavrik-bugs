@@ -83,6 +83,8 @@ jobs:
             })) {
               for (const it of page.data) {
                 if (it.pull_request) continue;
+                // «нужно уточнение»: ждём ответа Лаврика — автозакрытие запрещено (баг #28).
+                if ((it.labels || []).some(l => (l.name || '') === 'нужно уточнение')) continue;
                 const m = /lavrik-bug-id:(\d+)/.exec(it.body || '') || /^\[Баг #(\d+)\]/.exec(it.title || '');
                 if (!m) continue;
                 const id = Number(m[1]);

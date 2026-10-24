@@ -30,21 +30,20 @@ function badPassword(v){
 
 // Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
-const SKRIN_MAX_BYTES = 5_500_000; // ~4 МБ файла в base64 на картинку
-const SKRIN_MAX_COUNT = 4;
-const SKRIN_MAX_TOTAL = 22_000_000; // суммарный лимит 4 картинок
-
-function sanitizeSkrin(v){
-  if (!v || typeof v !== 'string') return null;
-  if (!IMG_RE.test(v)) return null;
-  if (v.length > SKRIN_MAX_BYTES) return null; // ~10 MB base64
-  return v;
-}
 
 // MULTI_SKRIN_V1 (lavrik-bugs #31): несколько скриншотов на один баг.
 // Принимаем строку (старый формат) или массив. В Supabase колонка skrin текстовая:
 // один скриншот — data:... как раньше, несколько — JSON-массив data:... строк.
 // Ошибки — явные (throw), без молчаливого отбрасывания файлов.
+// Лимиты считаем по ДЕКОДИРОВАННЫМ байтам картинки, а не по длине base64.
+const SKRIN_MAX_FILE = 4 * 1024 * 1024;  // 4 МиБ на файл (лимит формы — 4 МБ)
+const SKRIN_MAX_COUNT = 4;
+const SKRIN_MAX_TOTAL = 16 * 1024 * 1024; // 16 МиБ суммарно
+function skrinBytes(s){
+  const m = /^data:image\/[a-z+]+;base64,/.exec(s || '');
+  if (!m) return -1;
+  return Math.floor((s.length - m[0].length) * 3 / 4);
+}
 function sanitizeSkrins(v){
   const arr = Array.isArray(v) ? v : [v];
   if (arr.filter(Boolean).length > SKRIN_MAX_COUNT) {
@@ -54,15 +53,17 @@ function sanitizeSkrins(v){
   arr.forEach((s, i) => {
     if (!s) return;
     if (!IMG_RE.test(s)) throw new Error('Скриншот №' + (i + 1) + ' повреждён или не картинка');
-    if (s.length > SKRIN_MAX_BYTES) throw new Error('Скриншот №' + (i + 1) + ' больше 4 МБ — уменьши');
-    clean.push(s);
+    const bytes = skrinBytes(s);
+    if (bytes > SKRIN_MAX_FILE) throw new Error('Скриншот №' + (i + 1) + ' больше 4 МБ — уменьши');
+    clean.push({ s, bytes });
   });
-  if (clean.reduce((a, s) => a + s.length, 0) > SKRIN_MAX_TOTAL) {
-    throw new Error('Скриншоты вместе слишком тяжёлые (больше ~16 МБ) — отправь меньшим числом');
+  if (clean.reduce((a, c) => a + c.bytes, 0) > SKRIN_MAX_TOTAL) {
+    throw new Error('Скриншоты вместе больше 16 МБ — отправь меньшим числом');
   }
   if (!clean.length) return null;
-  if (clean.length === 1) return clean[0];
-  return JSON.stringify(clean);
+  const imgs = clean.map(c => c.s);
+  if (imgs.length === 1) return imgs[0];
+  return JSON.stringify(imgs);
 }
 
 function sanitizeUrl(v){
