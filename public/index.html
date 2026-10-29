@@ -45,6 +45,13 @@
   .q .done{color:#0d6e1c;font-weight:600;margin-top:8px;font-size:15px}
   .q .answered{color:#0d6e1c;font-size:14px;margin-top:6px}
   .inbox .empty{color:#777;text-align:center;padding:14px}
+  .history{margin-top:14px;scroll-margin-top:16px}
+  .history h2{font-size:20px;margin:0 0 8px}
+  .history .btn{font-size:16px;padding:12px}
+  .history-item{border:1px solid #d0d5e0;border-radius:12px;padding:12px;margin-top:12px;overflow-wrap:anywhere}
+  .history-item summary{cursor:pointer;line-height:1.5}
+  .history-item p{white-space:pre-wrap;line-height:1.5;margin:10px 0}
+  .history-item a{color:#1a4fd6}
 </style>
 </head>
 <body>
@@ -55,6 +62,7 @@
   <h1>🐞 Что сломалось, Лаврик?</h1>
   <p class="hint">Нажми микрофон и расскажи. Или напиши. Можно приложить скриншот. Потом — «Отправить».</p>
   <div class="today" id="todayStat" style="display:none;background:#eef3ff;border-radius:12px;padding:10px 14px;margin:0 0 6px;font-size:15px;font-weight:600;color:#1a4fd6"></div>
+  <p class="small"><a href="#history">📋 История отправлений ↓</a></p>
 
   <label>Пароль 🔑</label>
   <input type="password" id="parol" placeholder="Пароль (спроси у Виктора)" autocomplete="off" style="width:100%;font-size:17px;padding:12px;border:2px solid #d0d5e0;border-radius:12px;box-sizing:border-box">
@@ -140,6 +148,15 @@
   <div class="err" id="errmsg" style="display:none">⚠️ <span id="errtext"></span></div>
 </div>
 
+<section class="card history" id="history" aria-labelledby="historyTitle">
+  <h2 id="historyTitle">📋 История отправлений</h2>
+  <p class="hint">Отправленные баги, сначала новые. Нажми на обращение, чтобы прочитать подробности. Даты — по московскому времени.</p>
+  <button class="btn mic" id="historyRefresh" type="button">Обновить историю</button>
+  <p class="small" id="historyMessage" role="status" aria-live="polite">Загружаем историю…</p>
+  <div id="historyList"></div>
+  <button class="btn mic" id="historyMore" type="button" hidden>Показать ещё</button>
+</section>
+
 <div class="inbox" id="inbox">
   <h2>💬 Вопросы от агента</h2>
   <label style="margin-top:0">Пароль 🔑</label>
@@ -170,19 +187,81 @@ function loadParol(){
 });
 loadParol();
 
-/* TODAY_COUNT_V1: «сколько добавлено сегодня» — по московскому времени. */
+/* SUBMISSION_HISTORY_V1: история и счётчик используют один запрос. */
+let historyRows = [], historyLimit = 20, historyRequest = 0;
+const historyList = document.getElementById('historyList');
+const historyMessage = document.getElementById('historyMessage');
+const historyRefresh = document.getElementById('historyRefresh');
+const historyMore = document.getElementById('historyMore');
+function renderHistory(){
+  historyList.replaceChildren();
+  const statuses = {new:'🆕 Новое', in_progress:'🛠 В работе', done:'✅ Исправлено'};
+  historyRows.slice(0, historyLimit).forEach(b => {
+    const item = document.createElement('details');
+    item.className = 'history-item';
+    const summary = document.createElement('summary');
+    const date = new Date(b.created_at || '');
+    const at = Number.isNaN(date.getTime()) ? 'Дата неизвестна' : date.toLocaleString('ru-RU', {timeZone:'Europe/Moscow', day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+    const status = Object.prototype.hasOwnProperty.call(statuses, b.status) ? statuses[b.status] : 'Статус неизвестен';
+    summary.textContent = '№' + (b.id ?? '?') + ' · ' + at + ' · ' + status;
+    const title = document.createElement('div');
+    const text = String(b.chto || 'Без описания');
+    title.textContent = text.length > 100 ? text.slice(0, 100) + '…' : text;
+    summary.appendChild(title);
+    item.appendChild(summary);
+    [b.razdel ? 'Раздел: ' + b.razdel : '', b.vazhnost || '', text, b.kak ? 'Как повторить:\n' + b.kak : ''].filter(Boolean).forEach(value => {
+      const p = document.createElement('p');
+      p.textContent = value;
+      item.appendChild(p);
+    });
+    if (b.ssylka) {
+      try {
+        const url = new URL(b.ssylka);
+        if (url.protocol === 'https:' || url.protocol === 'http:') {
+          const link = document.createElement('a');
+          link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+          link.textContent = 'Открыть страницу с ошибкой';
+          item.appendChild(link);
+        }
+      } catch (_) {}
+    }
+    historyList.appendChild(item);
+  });
+  historyMore.hidden = historyLimit >= historyRows.length;
+  historyMore.style.display = historyMore.hidden ? 'none' : 'block';
+}
 async function loadTodayCount(){
+  const request = ++historyRequest;
+  historyRefresh.disabled = true;
+  historyMessage.textContent = 'Загружаем историю…';
   try {
-    const r = await fetch('/api/bugs');
+    const r = await fetch('/api/bugs', {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const a = await r.json();
-    const fmt = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Moscow' });
+    if (!Array.isArray(a)) throw new Error('Неверный ответ сервера');
+    if (request !== historyRequest) return;
+    historyRows = a.filter(b => b && typeof b === 'object' && b.status !== 'reply').sort((a,b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0));
+    renderHistory();
+    historyMessage.textContent = historyRows.length ? 'Всего отправлено: ' + historyRows.length : 'Пока нет отправленных багов. После отправки они появятся здесь.';
+    const fmt = new Intl.DateTimeFormat('sv-SE', {timeZone:'Europe/Moscow'});
     const today = fmt.format(new Date());
-    const n = a.filter(b => b.created_at && fmt.format(new Date(b.created_at)) === today).length;
+    const n = historyRows.filter(b => {
+      const d = new Date(b.created_at || '');
+      return !Number.isNaN(d.getTime()) && fmt.format(d) === today;
+    }).length;
     const el = document.getElementById('todayStat');
     el.textContent = '📊 Сегодня добавлено багов: ' + n;
     el.style.display = 'block';
-  } catch(e) { /* база недоступна — тихо */ }
+  } catch(e) {
+    if (request !== historyRequest) return;
+    historyMessage.textContent = 'Не удалось обновить историю. ' + (historyRows.length ? 'Ниже — ранее загруженные данные. ' : '') + 'Проверь интернет и нажми «Обновить историю».';
+    document.getElementById('todayStat').style.display = 'none';
+  } finally {
+    if (request === historyRequest) historyRefresh.disabled = false;
+  }
 }
+historyRefresh.onclick = () => loadTodayCount();
+historyMore.onclick = () => { historyLimit += 20; renderHistory(); };
 loadTodayCount();
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false, base = '';
@@ -316,6 +395,7 @@ document.getElementById('send').onclick = async () => {
     document.getElementById('oktext').textContent = 'Обращение №' + (j.id ?? '?') + ' сохранено. Спасибо, Лаврик!';
     okmsg.style.display='block';
     reset();
+    loadTodayCount();
   } catch(e) {
     errtext.textContent = (String(e.message||e).includes('Неверный пароль') ? 'Неверный пароль. Спроси пароль у Виктора.' : 'Не отправилось: ' + (e.message||e) + '. Проверь интернет и попробуй ещё.');
     errmsg.style.display='block';
