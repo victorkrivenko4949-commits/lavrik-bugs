@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(express.json({ limit: '25mb' })); // MULTI_SKRIN_V1: до 4 скриншотов
@@ -11,10 +12,65 @@ app.use((req, res, next) => {
 });
 app.use(express.static(path.join(__dirname, 'public')));
 
-const SUPA_URL = process.env.SUPABASE_URL || '';
-const SUPA_KEY = process.env.SUPABASE_ANON_KEY || '';
-// Ключ для чтения на сервере: service_role (обходит RLS). Если не задан — anon.
-const SUPA_READ_KEY = process.env.SUPABASE_SERVICE_KEY || SUPA_KEY;
+// RENDER_PG_V1: баги хранятся в Render Postgres (таблица lavrik_bugs), Supabase больше не используется.
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const pool = DATABASE_URL ? new Pool({
+  connectionString: DATABASE_URL,
+  ssl: /\.render\.com/.test(DATABASE_URL) ? { rejectUnauthorized: false } : false,
+  max: 5
+}) : null;
+if (pool) pool.on('error', e => console.error('pg pool error:', e.message));
+
+let _dbReady = null;
+function dbReady(){
+  if (!pool) return Promise.reject(new Error('DATABASE_URL not set'));
+  if (!_dbReady) {
+    _dbReady = pool.query(`CREATE TABLE IF NOT EXISTS lavrik_bugs (
+      id SERIAL PRIMARY KEY,
+      razdel TEXT,
+      chto TEXT,
+      kak TEXT,
+      ssylka TEXT,
+      vazhnost TEXT,
+      skrin TEXT,
+      status TEXT NOT NULL DEFAULT 'new',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`).catch(e => { _dbReady = null; throw e; });
+  }
+  return _dbReady;
+}
+
+const BUG_COLS = 'id,razdel,chto,kak,ssylka,vazhnost,skrin,status,created_at';
+
+async function dbSelectBugs(){
+  await dbReady();
+  const r = await pool.query(`SELECT ${BUG_COLS} FROM lavrik_bugs ORDER BY created_at DESC, id DESC`);
+  return r.rows;
+}
+
+async function dbInsertBug(p){
+  await dbReady();
+  const r = await pool.query(
+    `INSERT INTO lavrik_bugs (razdel,chto,kak,ssylka,vazhnost,skrin,status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING ${BUG_COLS}`,
+    [p.razdel || '', p.chto || '', p.kak || '', p.ssylka || '', p.vazhnost || '', p.skrin || null, p.status || 'new']
+  );
+  return r.rows[0];
+}
+
+async function dbUpdateStatus(id, status){
+  await dbReady();
+  const r = await pool.query('UPDATE lavrik_bugs SET status=$1 WHERE id=$2 RETURNING id', [status, id]);
+  return r.rowCount;
+}
+
+function friendlyErr(e){
+  const m = String((e && e.message) || e);
+  if (/DATABASE_URL not set|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|Connection terminated|timeout/i.test(m)) {
+    return 'База багов сейчас недоступна. Скопируй текст бага и напиши Виктору.';
+  }
+  return m;
+}
 
 // GitHub: дублирование багов в Issues, чтобы агент видел их через GitHub
 const GH_TOKEN = process.env.GITHUB_TOKEN || '';
@@ -22,23 +78,16 @@ const GH_REPO = process.env.GITHUB_REPO || 'victorkrivenko4949-commits/lavrik-bu
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
 // BUGS_PASSWORD_V1: пароль формы. Без него баги не принимаются (fail closed).
-// Задаётся в Environment на Render. В /api/config виден только факт, что пароль включён.
 const BUGS_PASSWORD = process.env.BUGS_PASSWORD || '';
 function badPassword(v){
   return !BUGS_PASSWORD || String(v || '').trim() !== BUGS_PASSWORD;
 }
 
-// Валидация data:image/...;base64,... (только PNG/JPEG/WebP/GIF)
 const IMG_RE = /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/;
 
-// MULTI_SKRIN_V1 (lavrik-bugs #31): несколько скриншотов на один баг.
-// Принимаем строку (старый формат) или массив. В Supabase колонка skrin текстовая:
-// один скриншот — data:... как раньше, несколько — JSON-массив data:... строк.
-// Ошибки — явные (throw), без молчаливого отбрасывания файлов.
-// Лимиты считаем по ДЕКОДИРОВАННЫМ байтам картинки, а не по длине base64.
-const SKRIN_MAX_FILE = 4 * 1024 * 1024;  // 4 МиБ на файл (лимит формы — 4 МБ)
+const SKRIN_MAX_FILE = 4 * 1024 * 1024;
 const SKRIN_MAX_COUNT = 4;
-const SKRIN_MAX_TOTAL = 16 * 1024 * 1024; // 16 МиБ суммарно
+const SKRIN_MAX_TOTAL = 16 * 1024 * 1024;
 function skrinBytes(s){
   const m = /^data:image\/[a-z+]+;base64,/.exec(s || '');
   if (!m) return -1;
@@ -78,18 +127,6 @@ function sanitizeText(v, max=5000){
   return v.slice(0, max);
 }
 
-function supaHeaders(key, extra={}){
-  return { 'apikey': key, 'Authorization': 'Bearer ' + key, ...extra };
-}
-
-async function supaSelectBugs(){
-  const r = await fetch(SUPA_URL + '/rest/v1/bugs?select=id,razdel,chto,kak,ssylka,vazhnost,skrin,status,created_at&order=created_at.desc', {
-    headers: supaHeaders(SUPA_READ_KEY)
-  });
-  if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
-  return r.json();
-}
-
 // ---------- GitHub Issues ----------
 const MARK = id => `<!-- lavrik-bug-id:${id} -->`;
 
@@ -110,8 +147,6 @@ function issueTitle(b){
 
 const BUG_TYPES = ['Ошибка','Дизайн','Съелся текст','Неправильная задача','Что-то пропало','Тормозит','Другое'];
 function issueTip(b){
-  // Тип проблемы хранится префиксом в chto: "[Дизайн] текст".
-  // Распознаём только допустимые типы, чтобы обычный текст «[...] ...» не стал меткой.
   const m = /^\[([^\]]{1,40})\]\s/.exec(String(b.chto || ''));
   return (m && BUG_TYPES.includes(m[1])) ? m[1] : '';
 }
@@ -132,7 +167,7 @@ function issueBody(b, baseUrl){
   if (b.kak) lines.push('', '### Как повторить', b.kak);
   if (b.ssylka) lines.push('', `**Ссылка на страницу:** ${b.ssylka}`);
   if (b.skrin) lines.push('', `📸 Есть скриншот — открыть: ${baseUrl}/admin.html#bug-${b.id}`);
-  lines.push('', `_Источник: Supabase bugs.id = ${b.id}. Создано автоматически сервером lavrik-bugs._`);
+  lines.push('', `_Источник: Render Postgres lavrik_bugs.id = ${b.id}. Создано автоматически сервером lavrik-bugs._`);
   return lines.filter(l => l !== null).join('\n');
 }
 
@@ -181,7 +216,7 @@ function baseUrlOf(req){
 
 // ---------- API ----------
 app.get('/api/config', (req,res) => res.json({
-  ok: Boolean(SUPA_URL && SUPA_KEY),
+  ok: Boolean(pool),
   github: Boolean(GH_TOKEN),
   repo: GH_REPO,
   needKey: Boolean(ADMIN_KEY),
@@ -189,15 +224,10 @@ app.get('/api/config', (req,res) => res.json({
 }));
 
 app.get('/api/bugs', async (req,res) => {
-  if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
-  try { res.json(await supaSelectBugs()); }
-  catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+  try { res.json(await dbSelectBugs()); }
+  catch(e){ console.error('GET /api/bugs:', e.message); res.status(500).json({ error: friendlyErr(e) }); }
 });
 
-// STATUS_SYNC_V1: смена статуса бага (new / in_progress / done).
-// Используется кнопками админки (admin.html) и workflow close-fixed.yml,
-// который переводит в done баги, исправленные коммитами в FORMYLA.
-// Если задан ADMIN_KEY — нужен заголовок x-admin-key.
 const ALLOWED_STATUS = ['new', 'in_progress', 'done'];
 app.patch('/api/bugs/:id', async (req,res) => {
   const id = Number(req.params.id);
@@ -205,23 +235,15 @@ app.patch('/api/bugs/:id', async (req,res) => {
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'bad id' });
   if (!ALLOWED_STATUS.includes(status)) return res.status(400).json({ error: 'bad status' });
   if (ADMIN_KEY && req.get('x-admin-key') !== ADMIN_KEY) return res.status(401).json({ error: 'Неверный ключ админа' });
-  if (!SUPA_URL) return res.status(500).json({ error: 'SUPABASE_URL not set' });
   try {
-    const r = await fetch(`${SUPA_URL}/rest/v1/bugs?id=eq.${id}`, {
-      method: 'PATCH',
-      headers: supaHeaders(SUPA_READ_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
-      body: JSON.stringify({ status })
-    });
-    if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
-    const rows = await r.json();
-    if (!Array.isArray(rows) || !rows.length) return res.status(404).json({ error: 'Баг не найден' });
+    const n = await dbUpdateStatus(id, status);
+    if (!n) return res.status(404).json({ error: 'Баг не найден' });
     _inboxCache = { at: 0, data: null };
     res.json({ ok: true, id, status });
-  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+  } catch(e){ console.error('PATCH /api/bugs:', e.message); res.status(500).json({ error: friendlyErr(e) }); }
 });
 
 app.post('/api/bugs', async (req,res) => {
-  // BUGS_PASSWORD_V1: сначала проверка пароля — до любых обращений к Supabase/GitHub.
   if (badPassword((req.body || {}).parol)) {
     return res.status(403).json({ error: 'Неверный пароль. Лаврик, спроси пароль у Виктора.' });
   }
@@ -229,8 +251,6 @@ app.post('/api/bugs', async (req,res) => {
   if (!chto || !String(chto).trim()) return res.status(400).json({ error: 'Пустое поле «Что случилось?»' });
 
   const ALLOWED_VAZHNOST = ['🔴 Вообще не работает','🟡 Работает, но криво','🟢 Мелочь'];
-  // BUG_TYPE_V1: тип проблемы от Лаврика. В Supabase нет отдельной колонки,
-  // поэтому тип сохраняется префиксом в chto: "[Дизайн] текст".
   const ALLOWED_TIP = ['Ошибка','Дизайн','Съелся текст','Неправильная задача','Что-то пропало','Тормозит','Другое'];
   const tipVal = ALLOWED_TIP.includes(tip) ? tip : '';
   const chtoFull = (tipVal ? `[${tipVal}] ` : '') + String(chto).trimLeft();
@@ -244,20 +264,11 @@ app.post('/api/bugs', async (req,res) => {
       vazhnost: ALLOWED_VAZHNOST.includes(vazhnost) ? vazhnost : '🟡 Работает, но криво',
       status: 'new'
     };
-    // MULTI_SKRIN_V1: скриншоты — с явными ошибками валидации
     try { payload.skrin = sanitizeSkrins(skrin); }
     catch (e) { return res.status(400).json({ error: String(e.message || e) }); }
 
-    const r = await fetch(SUPA_URL + '/rest/v1/bugs', {
-      method: 'POST',
-      headers: supaHeaders(SUPA_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
-      body: JSON.stringify(payload)
-    });
-    if (!r.ok) throw new Error('supabase: ' + r.status + ' ' + await r.text());
-    const created = await r.json();
-    const bug = created[0] || { ...payload, id: null, created_at: new Date().toISOString() };
+    const bug = await dbInsertBug(payload);
 
-    // Дублируем в GitHub Issues (ошибка GitHub не ломает отправку бага)
     let issue_url = null, issue_error = null;
     if (GH_TOKEN) {
       try { issue_url = await ghCreateIssue(bug, baseUrlOf(req)); }
@@ -266,35 +277,30 @@ app.post('/api/bugs', async (req,res) => {
 
     res.json({ ok: true, id: bug.id ?? null, issue_url, issue_error });
   } catch(e){
-    res.status(500).json({ error: String(e.message||e) });
+    console.error('POST /api/bugs:', e.message);
+    res.status(500).json({ error: friendlyErr(e) });
   }
 });
 
-// Разовая синхронизация: все баги из Supabase, которых ещё нет в Issues.
-// Открыть в браузере: /api/sync-issues?key=ВАШ_ADMIN_KEY
 app.get('/api/sync-issues', async (req,res) => {
   if (!ADMIN_KEY || req.query.key !== ADMIN_KEY) return res.status(403).json({ error: 'forbidden' });
   if (!GH_TOKEN) return res.status(500).json({ error: 'GITHUB_TOKEN not set' });
   try {
-    const bugs = await supaSelectBugs();
+    const bugs = await dbSelectBugs();
     const have = await ghExistingBugIds();
     const created = [], failed = [];
     const baseUrl = baseUrlOf(req);
-    for (const b of [...bugs].reverse()) { // старые первыми — чтобы номера issue шли по порядку
-      if (b.status === 'reply') continue; // ответы Лаврика — не баги
+    for (const b of [...bugs].reverse()) {
+      if (b.status === 'reply') continue;
       if (have.has(Number(b.id))) continue;
       try { created.push({ id: b.id, url: await ghCreateIssue(b, baseUrl) }); }
       catch(e){ failed.push({ id: b.id, error: String(e.message||e) }); }
     }
     res.json({ ok: true, total: bugs.length, already: have.size, created, failed });
-  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+  } catch(e){ res.status(500).json({ error: friendlyErr(e) }); }
 });
 
-// ---------- Входящие вопросы агента (двусторонняя связь с Лавриком) ----------
-// Ответ Лаврика сохраняется в Supabase строкой со status='reply' и kak='issue:N'.
-// Workflow sync-bugs.yml (GitHub Actions, свой токен с правом записи) публикует его
-// комментарием в issue с меткой <!-- lavrik-reply:ID -->. Если GITHUB_TOKEN сервера
-// умеет писать — комментарий ставится сразу, без ожидания workflow.
+// ---------- Входящие вопросы агента ----------
 const REPLY_PREFIX = '<!-- lavrik-reply';
 const INBOX_TTL_MS = 60 * 1000;
 let _inboxCache = { at: 0, data: null };
@@ -302,8 +308,8 @@ let _inboxCache = { at: 0, data: null };
 function isReply(body){ return String(body || '').includes(REPLY_PREFIX); }
 function isAgentQuestion(c){
   const b = String(c.body || '');
-  if (isReply(b)) return false;                         // ответ самого Лаврика
-  if (b.trim().startsWith('✅ Принято')) return false;  // автоответ бота
+  if (isReply(b)) return false;
+  if (b.trim().startsWith('✅ Принято')) return false;
   if ((c.user && c.user.type) === 'Bot') return false;
   return true;
 }
@@ -334,9 +340,9 @@ async function ghIssueComments(n){
 }
 
 async function pendingReplies(){
-  if (!SUPA_URL) return [];
+  if (!pool) return [];
   try {
-    const bugs = await supaSelectBugs();
+    const bugs = await dbSelectBugs();
     return bugs.filter(b => b.status === 'reply' && /^issue:\d+$/.test(String(b.kak || '')));
   } catch(e){ console.error('pendingReplies:', e.message); return []; }
 }
@@ -355,7 +361,6 @@ async function buildInbox(){
         text: isReply(c.body) ? stripReply(c.body) : String(c.body||'').trim(),
         at: c.created_at
       }));
-    // Ответы, которые уже в Supabase, но ещё не опубликованы workflow
     const delivered = new Set();
     for (const c of comments) { const m = /lavrik-reply:(\d+)/.exec(c.body || ''); if (m) delivered.add(Number(m[1])); }
     for (const q of queued) {
@@ -372,7 +377,7 @@ async function buildInbox(){
       title: it.title.replace(/^\[Баг #\d+\]\s*/, ''),
       url: it.html_url,
       thread,
-      waiting: last.from === 'agent',   // агент ждёт ответа
+      waiting: last.from === 'agent',
       last_at: last.at
     });
   }
@@ -391,7 +396,7 @@ app.get('/api/inbox', async (req,res) => {
   } catch(e){ res.status(500).json({ ok:false, error: String(e.message||e) }); }
 });
 
-const _replyHits = new Map(); // ip -> [timestamps]
+const _replyHits = new Map();
 function replyRateOk(ip){
   const now = Date.now(), arr = (_replyHits.get(ip) || []).filter(t => now - t < 10*60*1000);
   arr.push(now); _replyHits.set(ip, arr);
@@ -399,8 +404,6 @@ function replyRateOk(ip){
 }
 
 app.post('/api/inbox/:issue/reply', async (req,res) => {
-  // BUGS_PASSWORD_V1: ответы Лаврика тоже за паролем — иначе кто угодно
-  // напишет «Ответ Лаврика», и агент примет его за Лаврика.
   if (badPassword((req.body || {}).parol)) {
     return res.status(403).json({ error: 'Неверный пароль. Лаврик, спроси пароль у Виктора.' });
   }
@@ -416,19 +419,11 @@ app.post('/api/inbox/:issue/reply', async (req,res) => {
     const issue = await ir.json();
     if (!/lavrik-bug-id:\d+/.test(issue.body || '')) return res.status(403).json({ error: 'Это не баг Лаврика' });
 
-    // 1) Очередь в Supabase — её публикует workflow (надёжно, не зависит от прав токена)
-    const sr = await fetch(SUPA_URL + '/rest/v1/bugs', {
-      method: 'POST',
-      headers: supaHeaders(SUPA_KEY, { 'Content-Type':'application/json', 'Prefer': 'return=representation' }),
-      body: JSON.stringify({
-        razdel: 'Ответ агенту', chto: text, kak: `issue:${n}`, ssylka: issue.html_url || '',
-        vazhnost: '🟢 Мелочь', skrin: null, status: 'reply'
-      })
-    });
-    if (!sr.ok) throw new Error('supabase: ' + sr.status + ' ' + await sr.text());
-    const row = (await sr.json())[0] || {};
+    const row = await dbInsertBug({
+      razdel: 'Ответ агенту', chto: text, kak: `issue:${n}`, ssylka: issue.html_url || '',
+      vazhnost: '🟢 Мелочь', skrin: null, status: 'reply'
+    }) || {};
 
-    // 2) Если токен сервера умеет писать — публикуем сразу (не обязательно)
     let via = 'queue';
     if (row.id) {
       const body = `<!-- lavrik-reply:${row.id} -->\n**💬 Ответ Лаврика:**\n\n${text}`;
@@ -439,8 +434,12 @@ app.post('/api/inbox/:issue/reply', async (req,res) => {
     }
     _inboxCache = { at: 0, data: null };
     res.json({ ok: true, via });
-  } catch(e){ res.status(500).json({ error: String(e.message||e) }); }
+  } catch(e){ console.error('reply:', e.message); res.status(500).json({ error: friendlyErr(e) }); }
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log('lavrik-bugs on ' + port));
+app.listen(port, () => {
+  console.log('lavrik-bugs on ' + port);
+  if (pool) dbReady().then(() => console.log('db: lavrik_bugs ready')).catch(e => console.error('db init failed:', e.message));
+  else console.error('DATABASE_URL not set');
+});
